@@ -31,12 +31,19 @@ your own `gh` login.
 ```bash
 cp .sandcastle/.env.example .sandcastle/.env
 claude setup-token          # paste the result as CLAUDE_CODE_OAUTH_TOKEN
-export VERCEL_TOKEN=...     # in your shell, NOT in .sandcastle/.env
+cp .env.example .env        # then fill in VERCEL_TOKEN
 ```
 
-The Vercel token stays in your shell deliberately: Sandcastle forwards every key
-in `.sandcastle/.env` into the sandbox, and the agent has no business holding a
-credential that can spend on your account. Then:
+Two env files, and which one a credential goes in is a security decision.
+Sandcastle builds the sandbox's environment from the *keys* of
+`.sandcastle/.env`, so everything there is readable by the autonomous agent —
+and a key that is not there is never forwarded, even when the host process has
+it. `.env` at the repository root is therefore host-only: `npm run sandcastle`
+loads it into the orchestrator, and nothing copies it into the microVM. The
+Vercel token lives there because the agent has no business holding a credential
+that can spend on your account. `main.mts` refuses to start if it finds
+`VERCEL_TOKEN` in `.sandcastle/.env`, and refuses to start with no token at all
+rather than failing later with an opaque SDK error. Then:
 
 ```bash
 npm install

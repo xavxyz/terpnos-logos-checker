@@ -13,6 +13,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,6 +126,58 @@ const vercelWithStdin = (options: VercelOptions): IsolatedSandboxProvider => {
       };
     },
   });
+};
+
+/**
+ * Where the Vercel token is allowed to live, and where it is not.
+ *
+ * Sandcastle builds the sandbox's environment from the *keys* of
+ * `.sandcastle/.env` — a key absent from that file is never forwarded, even
+ * when the host process has it. So the token that can spend on your Vercel
+ * account goes in the repository-root `.env`, which `npm run sandcastle` loads
+ * into this process and nothing copies into the microVM. Both files are
+ * git-ignored.
+ *
+ * Putting it in `.sandcastle/.env` instead would hand an autonomous agent a
+ * billable credential, which is why that is a hard error rather than a warning.
+ */
+const HOST_ONLY_ENV_FILE = ".env";
+const SANDBOX_ENV_FILE = ".sandcastle/.env";
+
+/** Does an env file define this key? Comments and `export ` prefixes ignored. */
+const envFileDefines = (path: string, key: string): boolean => {
+  let contents: string;
+  try {
+    contents = readFileSync(path, "utf8");
+  } catch {
+    return false;
+  }
+  const definition = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=`);
+  return contents.split("\n").some((line) => definition.test(line));
+};
+
+/**
+ * Fail before a sandbox is created rather than after, and fail with the fix in
+ * the message: a missing token otherwise surfaces as an opaque SDK error, and a
+ * leaked one surfaces as nothing at all.
+ */
+const assertVercelCredential = (): void => {
+  if (envFileDefines(SANDBOX_ENV_FILE, "VERCEL_TOKEN")) {
+    throw new Error(
+      `${SANDBOX_ENV_FILE} defines VERCEL_TOKEN. Every key in that file is forwarded ` +
+        `into the sandbox, so this would hand the agent a credential that can spend on ` +
+        `your Vercel account. Move the line to ${HOST_ONLY_ENV_FILE} at the repository ` +
+        `root, which stays on the host.`,
+    );
+  }
+
+  if (process.env.VERCEL_TOKEN || process.env.VERCEL_OIDC_TOKEN) return;
+
+  throw new Error(
+    `No Vercel credential. Put VERCEL_TOKEN in ${HOST_ONLY_ENV_FILE} at the repository ` +
+      `root (see .env.example) — \`npm run sandcastle\` loads it on the host and never ` +
+      `forwards it to the agent. Exporting it in your shell also works.`,
+  );
 };
 
 /** The gates every issue must clear. Names fixed by issue #11. */
@@ -409,6 +462,8 @@ const main = async () => {
     });
     return;
   }
+
+  assertVercelCredential();
 
   // This script moves BASE_BRANCH and checks out agent branches, so it has to
   // own the checkout it runs in. Run it from the main clone, not from a git

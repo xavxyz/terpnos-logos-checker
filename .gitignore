@@ -7,7 +7,8 @@ dist/
 # Vercel
 .vercel
 
-# Local env — never commit
+# Local env — never commit. `.env` is host-only: unlike .sandcastle/.env it is
+# never forwarded into the sandbox, so host credentials belong there.
 .env
 .env*.local
 .sandcastle/.env
@@ -22,3 +23,7 @@ dist/
 
 # Test coverage
 coverage/
+
+# Claude Code worktrees. Untracked, and the orchestrator refuses to start on a
+# dirty tree — so without this an open worktree blocks the whole pipeline.
+.claude/worktrees/

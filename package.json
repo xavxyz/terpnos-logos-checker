@@ -13,7 +13,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "sandcastle": "tsx --env-file-if-exists=.sandcastle/.env .sandcastle/main.mts",
+    "sandcastle": "tsx --env-file-if-exists=.env --env-file-if-exists=.sandcastle/.env .sandcastle/main.mts",
     "sandcastle:check": "tsc -p .sandcastle/tsconfig.json"
   },
   "devDependencies": {
