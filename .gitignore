@@ -16,3 +16,9 @@ dist/
 .sandcastle/worktrees/
 .sandcastle/logs/
 .sandcastle/patches/
+
+# TypeScript
+*.tsbuildinfo
+
+# Test coverage
+coverage/
