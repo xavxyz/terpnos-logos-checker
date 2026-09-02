@@ -157,27 +157,63 @@ const envFileDefines = (path: string, key: string): boolean => {
 };
 
 /**
+ * The three keys `@vercel/sandbox` needs together, and the reason all three are
+ * required rather than just the token.
+ *
+ * `getCredentials()` in `@vercel/sandbox` takes an all-or-nothing view: it uses
+ * the explicit `token`/`teamId`/`projectId` triple only when all three are
+ * present, and otherwise ignores what it was given and goes down the OIDC path
+ * — which on a developer machine dead-ends in "Could not get credentials from
+ * OIDC context. Please link your Vercel project…". A token on its own therefore
+ * does not fail as a bad token; it fails as a missing OIDC context, several
+ * layers away from the actual cause.
+ *
+ * Note that the SDK does not read `VERCEL_TOKEN` from the environment itself,
+ * despite what the provider's option docs suggest. Reading the environment and
+ * passing the triple explicitly is this harness's job.
+ */
+const VERCEL_KEYS = ["VERCEL_TOKEN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID"] as const;
+
+interface VercelCredential {
+  readonly token: string;
+  readonly teamId: string;
+  readonly projectId: string;
+}
+
+/**
  * Fail before a sandbox is created rather than after, and fail with the fix in
- * the message: a missing token otherwise surfaces as an opaque SDK error, and a
+ * the message: a missing key otherwise surfaces as an opaque OIDC error, and a
  * leaked one surfaces as nothing at all.
  */
-const assertVercelCredential = (): void => {
-  if (envFileDefines(SANDBOX_ENV_FILE, "VERCEL_TOKEN")) {
+const resolveVercelCredential = (): VercelCredential => {
+  const leaked = VERCEL_KEYS.filter((key) => envFileDefines(SANDBOX_ENV_FILE, key));
+  if (leaked.length > 0) {
     throw new Error(
-      `${SANDBOX_ENV_FILE} defines VERCEL_TOKEN. Every key in that file is forwarded ` +
-        `into the sandbox, so this would hand the agent a credential that can spend on ` +
-        `your Vercel account. Move the line to ${HOST_ONLY_ENV_FILE} at the repository ` +
-        `root, which stays on the host.`,
+      `${SANDBOX_ENV_FILE} defines ${leaked.join(", ")}. Every key in that file is ` +
+        `forwarded into the sandbox, so this would hand the agent credentials that can ` +
+        `spend on your Vercel account. Move ${leaked.length === 1 ? "that line" : "those lines"} ` +
+        `to ${HOST_ONLY_ENV_FILE} at the repository root, which stays on the host.`,
     );
   }
 
-  if (process.env.VERCEL_TOKEN || process.env.VERCEL_OIDC_TOKEN) return;
+  const missing = VERCEL_KEYS.filter((key) => !process.env[key]);
+  if (missing.length > 0) {
+    throw new Error(
+      `Incomplete Vercel credential, missing: ${missing.join(", ")}. @vercel/sandbox ` +
+        `needs all of ${VERCEL_KEYS.join(", ")} together — with any of them absent it ` +
+        `falls back to OIDC and fails with "Could not get credentials from OIDC ` +
+        `context". Put all three in ${HOST_ONLY_ENV_FILE} at the repository root (see ` +
+        `.env.example) — \`npm run sandcastle\` loads it on the host and never forwards ` +
+        `it to the agent. The team and project IDs are on your project's Vercel ` +
+        `settings page, or from \`npx vercel link\` in .vercel/project.json.`,
+    );
+  }
 
-  throw new Error(
-    `No Vercel credential. Put VERCEL_TOKEN in ${HOST_ONLY_ENV_FILE} at the repository ` +
-      `root (see .env.example) — \`npm run sandcastle\` loads it on the host and never ` +
-      `forwards it to the agent. Exporting it in your shell also works.`,
-  );
+  return {
+    token: process.env.VERCEL_TOKEN!,
+    teamId: process.env.VERCEL_TEAM_ID!,
+    projectId: process.env.VERCEL_PROJECT_ID!,
+  };
 };
 
 /** The gates every issue must clear. Names fixed by issue #11. */
@@ -258,7 +294,11 @@ const succeeds = (command: string, args: string[]): boolean => {
  * work beyond what Sandcastle itself does on its own named branch, because the
  * whole wave runs concurrently against a single checkout.
  */
-const implementIssue = async (issue: number, signal: AbortSignal): Promise<AgentRun> => {
+const implementIssue = async (
+  issue: number,
+  signal: AbortSignal,
+  credential: VercelCredential,
+): Promise<AgentRun> => {
   const branch = `agent/issue-${issue}`;
   if (branchExists(branch)) {
     throw new Error(
@@ -278,6 +318,8 @@ const implementIssue = async (issue: number, signal: AbortSignal): Promise<Agent
       timeout: SANDBOX_TIMEOUT_MS,
       resources: { vcpus: VCPUS },
       runtime: "node24",
+      // All three, or the SDK silently ignores them and tries OIDC instead.
+      ...credential,
     }),
     promptFile: `${process.cwd()}/.sandcastle/prompt.md`,
     // The issue text is read here, on the host, under your own `gh` login, and
@@ -490,7 +532,7 @@ const main = async () => {
     return;
   }
 
-  assertVercelCredential();
+  const credential = resolveVercelCredential();
 
   // This script moves BASE_BRANCH and checks out agent branches, so it has to
   // own the checkout it runs in. Run it from the main clone, not from a git
@@ -522,7 +564,7 @@ const main = async () => {
     let agentRuns: AgentRun[];
     try {
       agentRuns = await Promise.all(
-        todo.map((issue) => implementIssue(issue, controller.signal)),
+        todo.map((issue) => implementIssue(issue, controller.signal, credential)),
       );
     } catch (error) {
       controller.abort();
