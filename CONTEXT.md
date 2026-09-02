@@ -2,8 +2,8 @@
 
 Shared vocabulary for this repository. Every term here has exactly one meaning
 in code, tests, issues and commit messages. The application's interface is in
-French; this glossary maps each French surface term to the English identifier
-used in code.
+French; French surface terms are given in italics beside the English term used
+in code and prose.
 
 ## The domain
 
@@ -14,10 +14,10 @@ no user accounts, roles or permissions.
 **Session** _(séance)_ — one sophrology session. It has exactly one terpnos
 logos and, once recorded, exactly one recording.
 
-**Terpnos logos** — the complete script the sophrologist writes for a session,
-and reads aloud to produce the recording. Always written in full: never "the
-script", never "the text". Its paragraphs, line breaks and punctuation carry the
-breathing and pacing of the session and are part of its meaning.
+**Terpnos logos** — the complete text the sophrologist writes for a session, and
+reads aloud to produce the recording. In prose, always written in full: never
+"the script", never "the text". Its paragraphs, line breaks and punctuation
+carry the breathing and pacing of the session and are part of its meaning.
 
 **Recording** — the audio file of the sophrologist reading the terpnos logos.
 One file, typically 20–40 minutes.
@@ -73,10 +73,12 @@ content. This is the only text compared against the transcript.
 
 ## Deliberately absent
 
-These have no term because the product does not have the concept:
+These have no term because the product does not have the concept. Listed so that
+nobody invents vocabulary for them:
 
-- **No score.** No fidelity percentage, no counter, no statistic anywhere in the
-  report. The tool informs; it does not grade.
-- **No history.** Nothing is persisted: no terpnos logos, no recording, no
-  report, no database.
-- **No user.** One shared password, no accounts.
+- **No score.** There is no fidelity, no accuracy and no completeness. The tool
+  informs; it does not grade.
+- **No history.** There is no past session, no archive and no library. A session
+  is processed and gone.
+- **No user.** There is no account, no role and no permission. The sophrologist
+  is the only person the domain knows about.

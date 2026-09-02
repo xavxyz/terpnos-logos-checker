@@ -15,21 +15,28 @@ edit it, and editing it mid-run has no effect on a run already in flight.
    and `npm run build` green **inside the sandbox**, then commits.
 4. The agent emits a `<verdict>` listing every acceptance criterion and whether
    it met it.
-5. Sandcastle syncs the commits back to this checkout. The host pushes the
-   branch, opens a pull request, and — for issues not reserved for human review
-   — merges it.
+5. Sandcastle syncs the commits back to this checkout. The host then re-runs all
+   three gates itself against the synced branch — the agent's verdict is an
+   input to the decision, never the decision — and rejects any run that modified
+   `.sandcastle/`.
+6. The host pushes the branch, opens a pull request, and — for issues not
+   reserved for human review — merges it.
 
-The sandbox never receives a GitHub token, the AssemblyAI key, or a Blob token.
-Everything that writes to GitHub runs on your machine under your own `gh` login.
+The sandbox never receives a GitHub token, a Vercel token, the AssemblyAI key,
+or a Blob token. Everything that writes to GitHub runs on your machine under
+your own `gh` login.
 
 ## Setup
 
 ```bash
 cp .sandcastle/.env.example .sandcastle/.env
 claude setup-token          # paste the result as CLAUDE_CODE_OAUTH_TOKEN
+export VERCEL_TOKEN=...     # in your shell, NOT in .sandcastle/.env
 ```
 
-Add a Vercel token to `.sandcastle/.env` as well. Then:
+The Vercel token stays in your shell deliberately: Sandcastle forwards every key
+in `.sandcastle/.env` into the sandbox, and the agent has no business holding a
+credential that can spend on your account. Then:
 
 ```bash
 npm install
@@ -40,6 +47,17 @@ npm run sandcastle                 # the whole pipeline
 
 Run it from a clean working tree on `master`. The script refuses to start
 otherwise, because agents' commits are applied onto this checkout.
+
+`SANDCASTLE_MODEL` overrides the model if you want to trade quality for compute
+on a wave you are less worried about.
+
+## It stops on purpose
+
+Issues #11, #2 and #3 open a **draft** pull request and the pipeline halts:
+later waves branch from `master`, so continuing before you have merged them
+would build on scaffolding, an auth shape, or a `buildReport` seam that does not
+exist yet. Review the draft, merge it, and run the same command again — closed
+issues are skipped, so it picks up where it left off.
 
 ## Start with one issue
 

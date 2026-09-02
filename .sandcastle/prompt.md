@@ -5,9 +5,9 @@ autonomously, with no human available to answer questions.
 
 Issue number: {{ISSUE_NUMBER}}
 
-Title: !`gh issue view {{ISSUE_NUMBER}} --repo xavxyz/terpnos-logos-checker --json title -q .title`
+Title: !`gh issue view {{ISSUE_NUMBER}} --repo {{REPO}} --json title -q .title`
 
-!`gh issue view {{ISSUE_NUMBER}} --repo xavxyz/terpnos-logos-checker --json body -q .body`
+!`gh issue view {{ISSUE_NUMBER}} --repo {{REPO}} --json body -q .body`
 
 ## The parent specification
 
@@ -15,7 +15,7 @@ Every issue is a slice of issue #1, which holds the decisions all slices share.
 Read it before you write any code; it is the authority when your issue is
 ambiguous.
 
-!`gh issue view 1 --repo xavxyz/terpnos-logos-checker --json body -q .body`
+!`gh issue view 1 --repo {{REPO}} --json body -q .body`
 
 ## Rules
 
@@ -24,6 +24,10 @@ exactly — in identifiers, test names, comments and commit messages. It is the
 shared glossary for every issue in this project. If you need a domain concept it
 does not define, you are probably inventing language the project does not use:
 prefer an existing term.
+
+One deliberate exception: issue #1 fixes the seam's parameter name as `script`,
+and issue #3 repeats it. Keep that name so the signature matches the spec, even
+though prose everywhere else says "terpnos logos".
 
 **Scope.** Implement your issue and nothing else. Do not start work described by
 another issue, even if it looks trivial and adjacent. Do not refactor code
