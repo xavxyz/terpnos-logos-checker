@@ -4,6 +4,10 @@ out/
 dist/
 .DS_Store
 
+# TypeScript's incremental build cache. Machine-local and regenerable, and
+# untracked it makes the tree dirty — which the orchestrator refuses to run on.
+*.tsbuildinfo
+
 # Vercel
 .vercel
 
