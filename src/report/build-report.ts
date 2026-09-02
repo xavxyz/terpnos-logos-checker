@@ -1,14 +1,13 @@
 import { diff, type DiffOp } from "./diff";
 import {
-  tokeniseScript,
+  tokeniseTerpnosLogos,
   tokeniseTranscript,
-  type SpokenToken,
+  type SpokenWord,
+  type TranscriptWord,
   type WrittenWord,
 } from "./tokenise";
 
-export type Transcript = {
-  words: readonly { text: string; start: number }[];
-};
+export type Transcript = { words: readonly SpokenWord[] };
 
 export type ReportInput = {
   /** The terpnos logos, exactly as the sophrologist wrote it. */
@@ -37,10 +36,10 @@ const STYLES = `
   .omission {
     text-decoration: line-through;
   }
-  [data-start] {
-    cursor: pointer;
-  }
 `;
+
+/** The moment a difference points at when nothing has been spoken yet. */
+const START_OF_RECORDING = 0;
 
 /**
  * The report: the terpnos logos as written, with every difference marked
@@ -48,152 +47,137 @@ const STYLES = `
  * author's own paragraphs, line breaks and punctuation survive.
  */
 export function buildReport({ script, transcript }: ReportInput): string {
-  const written = tokeniseScript(script);
-  const spoken = tokeniseTranscript(transcript.words);
+  const terpnosLogos = script;
+  const written = tokeniseTerpnosLogos(terpnosLogos);
+  const heard = tokeniseTranscript(transcript.words);
   const ops = diff(
     written.map((word) => word.normalised),
-    spoken.map((token) => token.normalised),
+    heard.map((word) => word.normalised),
   );
 
-  return document(render({ script, written, spoken, ops }));
+  return htmlDocument(render({ terpnosLogos, written, heard, ops }));
 }
 
 type RenderInput = {
-  script: string;
+  terpnosLogos: string;
   written: WrittenWord[];
-  spoken: SpokenToken[];
+  heard: TranscriptWord[];
   ops: DiffOp[];
 };
 
-function render({ script, written, spoken, ops }: RenderInput): string {
+function render({ terpnosLogos, written, heard, ops }: RenderInput): string {
   const out: string[] = [];
   let cursor = 0;
   /** Where the recording stands, so a difference can seek the player. */
-  let lastSpokenStart: number | null = null;
-  let anyWordWritten = false;
+  let lastSpokenStart = START_OF_RECORDING;
+  let anythingRendered = false;
 
-  const gapBefore = (word: WrittenWord) => {
-    out.push(escape(script.slice(cursor, word.from)));
+  const emitGapBefore = (word: WrittenWord) => {
+    out.push(escapeHtml(terpnosLogos.slice(cursor, word.from)));
   };
 
   for (const run of runs(ops)) {
-    if (run[0].kind === "equal") {
-      for (const op of run as Extract<DiffOp, { kind: "equal" }>[]) {
-        const word = written[op.left];
-        gapBefore(word);
-        out.push(escape(script.slice(word.from, word.to)));
-        cursor = word.to;
-        lastSpokenStart = spoken[op.right].start;
-        anyWordWritten = true;
+    switch (run.kind) {
+      case "equal": {
+        for (const op of run.ops) {
+          const word = written[op.left];
+          emitGapBefore(word);
+          out.push(escapeHtml(terpnosLogos.slice(word.from, word.to)));
+          cursor = word.to;
+          lastSpokenStart = heard[op.right].start;
+          anythingRendered = true;
+        }
+        break;
       }
-      continue;
-    }
 
-    if (run[0].kind === "omission") {
-      const omitted = (run as Extract<DiffOp, { kind: "omission" }>[]).map(
-        (op) => written[op.left],
-      );
-      // A block never spans a line break: the structure of the document stays
-      // readable, and each line keeps its own strike-through.
-      for (const block of splitOnLineBreaks(omitted, script)) {
-        const first = block[0];
-        const last = block[block.length - 1];
-        gapBefore(first);
+      case "omission": {
+        // One skipped passage, one continuous block, punctuation included.
+        const first = written[run.ops[0].left];
+        const last = written[run.ops[run.ops.length - 1].left];
+        emitGapBefore(first);
         out.push(
           span(
             "omission",
             lastSpokenStart,
-            escape(script.slice(first.from, last.to)),
+            escapeHtml(terpnosLogos.slice(first.from, last.to)),
           ),
         );
         cursor = last.to;
-        anyWordWritten = true;
+        anythingRendered = true;
+        break;
       }
-      continue;
+
+      case "addition": {
+        const added = run.ops.map((op) => heard[op.right]);
+        // Punctuation closing the previous written word stays attached to it;
+        // the addition goes after it, and before any line break that follows.
+        const attached = anythingRendered
+          ? (/^[^\s\p{L}\p{N}]*/u.exec(terpnosLogos.slice(cursor))?.[0] ?? "")
+          : "";
+        out.push(escapeHtml(attached));
+        cursor += attached.length;
+
+        const said = span(
+          "addition",
+          added[0].start,
+          escapeHtml(spokenText(added)),
+        );
+        // The addition sits between two written words; a space keeps it apart.
+        out.push(anythingRendered ? ` ${said}` : `${said} `);
+        lastSpokenStart = added[added.length - 1].start;
+        break;
+      }
     }
-
-    const added = (run as Extract<DiffOp, { kind: "addition" }>[]).map(
-      (op) => spoken[op.right],
-    );
-    // Punctuation closing the previous written word stays attached to it; the
-    // addition goes after it, and before any line break that follows.
-    const attached = anyWordWritten
-      ? (/^[^\s\p{L}\p{N}]*/u.exec(script.slice(cursor))?.[0] ?? "")
-      : "";
-    out.push(escape(attached));
-    cursor += attached.length;
-
-    const heard = span("addition", added[0].start, escape(spokenText(added)));
-    // The addition sits between two written words; a space keeps it apart.
-    out.push(anyWordWritten ? ` ${heard}` : `${heard} `);
-    lastSpokenStart = added[added.length - 1].start;
   }
 
-  out.push(escape(script.slice(cursor)));
+  out.push(escapeHtml(terpnosLogos.slice(cursor)));
   return out.join("");
 }
 
 /** Consecutive operations of one kind: one difference, not a scatter of words. */
-function runs(ops: DiffOp[]): DiffOp[][] {
-  const grouped: DiffOp[][] = [];
+type Run =
+  | { kind: "equal"; ops: Extract<DiffOp, { kind: "equal" }>[] }
+  | { kind: "omission"; ops: Extract<DiffOp, { kind: "omission" }>[] }
+  | { kind: "addition"; ops: Extract<DiffOp, { kind: "addition" }>[] };
+
+function runs(ops: DiffOp[]): Run[] {
+  const grouped: Run[] = [];
   for (const op of ops) {
     const last = grouped[grouped.length - 1];
-    if (last && last[0].kind === op.kind) last.push(op);
-    else grouped.push([op]);
+    if (last && last.kind === op.kind) (last.ops as DiffOp[]).push(op);
+    else grouped.push({ kind: op.kind, ops: [op] } as Run);
   }
   return grouped;
 }
 
-function splitOnLineBreaks(
-  omitted: WrittenWord[],
-  script: string,
-): WrittenWord[][] {
-  const blocks: WrittenWord[][] = [];
-  for (const word of omitted) {
-    const block = blocks[blocks.length - 1];
-    const previous = block?.[block.length - 1];
-    if (
-      block &&
-      previous &&
-      !script.slice(previous.to, word.from).includes("\n")
-    ) {
-      block.push(word);
-    } else {
-      blocks.push([word]);
-    }
-  }
-  return blocks;
-}
-
 /** What the transcription heard, one entry per spoken word. */
-function spokenText(tokens: SpokenToken[]): string {
+function spokenText(words: TranscriptWord[]): string {
   const said: string[] = [];
   let previousIndex = -1;
-  for (const token of tokens) {
-    if (token.spokenIndex === previousIndex) continue;
-    said.push(token.display);
-    previousIndex = token.spokenIndex;
+  for (const word of words) {
+    if (word.heardIndex === previousIndex) continue;
+    said.push(word.display);
+    previousIndex = word.heardIndex;
   }
   return said.join(" ");
 }
 
 function span(
   kind: "addition" | "omission",
-  start: number | null,
+  start: number,
   content: string,
 ): string {
-  const moment = start === null ? "" : ` data-start="${Math.round(start)}"`;
-  return `<span class="${kind}"${moment}>${content}</span>`;
+  return `<span class="${kind}" data-start="${Math.round(start)}">${content}</span>`;
 }
 
-function escape(text: string): string {
+function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
 
-function document(body: string): string {
+function htmlDocument(body: string): string {
   return `<!DOCTYPE html>
 <html lang="fr">
 <head>

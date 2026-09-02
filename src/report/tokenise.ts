@@ -2,6 +2,9 @@ import { normalise } from "./normalise";
 
 const WORD = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu;
 
+/** One word of the transcript, carrying the moment it was spoken. */
+export type SpokenWord = { text: string; start: number };
+
 /** A word of the terpnos logos, kept in place so the report can rebuild it. */
 export type WrittenWord = {
   normalised: string;
@@ -10,19 +13,19 @@ export type WrittenWord = {
   to: number;
 };
 
-/** A word of the transcript, with the moment it was spoken. */
-export type SpokenToken = {
+/** A word of the transcript, ready to be compared and displayed. */
+export type TranscriptWord = {
   normalised: string;
   /** What the transcription heard, punctuation included, shown as-is. */
   display: string;
   start: number;
   /** Which transcript word this came from; a compound word yields several. */
-  spokenIndex: number;
+  heardIndex: number;
 };
 
-export function tokeniseScript(script: string): WrittenWord[] {
+export function tokeniseTerpnosLogos(terpnosLogos: string): WrittenWord[] {
   const words: WrittenWord[] = [];
-  for (const match of script.matchAll(WORD)) {
+  for (const match of terpnosLogos.matchAll(WORD)) {
     const normalised = normalise(match[0]);
     if (!normalised) continue;
     words.push({
@@ -35,10 +38,10 @@ export function tokeniseScript(script: string): WrittenWord[] {
 }
 
 export function tokeniseTranscript(
-  words: readonly { text: string; start: number }[],
-): SpokenToken[] {
-  const tokens: SpokenToken[] = [];
-  words.forEach((word, spokenIndex) => {
+  words: readonly SpokenWord[],
+): TranscriptWord[] {
+  const tokens: TranscriptWord[] = [];
+  words.forEach((word, heardIndex) => {
     for (const match of word.text.matchAll(WORD)) {
       const normalised = normalise(match[0]);
       if (!normalised) continue;
@@ -46,7 +49,7 @@ export function tokeniseTranscript(
         normalised,
         display: word.text,
         start: word.start,
-        spokenIndex,
+        heardIndex,
       });
     }
   });

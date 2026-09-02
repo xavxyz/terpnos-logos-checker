@@ -180,6 +180,22 @@ describe("buildReport", () => {
     expect(startsOf(html, "omission")).toEqual([1800]);
   });
 
+  it("gives an omission before any spoken word the start of the recording", () => {
+    const html = buildReport({
+      script: "Doucement, fermez les yeux.",
+      transcript: {
+        words: [
+          { text: "Fermez", start: 1000 },
+          { text: "les", start: 1400 },
+          { text: "yeux.", start: 1800 },
+        ],
+      },
+    });
+
+    expect(marked(html, "omission")).toEqual(["Doucement"]);
+    expect(startsOf(html, "omission")).toEqual([0]);
+  });
+
   it("never prints a timecode as text", () => {
     const html = buildReport({
       script: "Fermez les yeux doucement.",
@@ -195,8 +211,7 @@ describe("buildReport", () => {
 
     expect(marked(html, "addition")).toEqual([]);
     expect(marked(html, "omission")).toEqual([
-      "Fermez les yeux",
-      "Respirez lentement",
+      "Fermez les yeux.\n\nRespirez lentement",
     ]);
     expect(plainText(html)).toContain(script);
   });
@@ -231,7 +246,7 @@ describe("buildReport", () => {
     const elapsed = performance.now() - startedAt;
 
     expect(marked(html, "omission")).toHaveLength(10);
-    expect(elapsed).toBeLessThan(2000);
+    expect(elapsed).toBeLessThan(500);
   });
 
   it("compares a 2000-word session against silence quickly", () => {
@@ -242,6 +257,6 @@ describe("buildReport", () => {
     const elapsed = performance.now() - startedAt;
 
     expect(marked(html, "omission")).toHaveLength(1);
-    expect(elapsed).toBeLessThan(2000);
+    expect(elapsed).toBeLessThan(500);
   });
 });
