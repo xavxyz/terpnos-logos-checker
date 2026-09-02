@@ -453,12 +453,39 @@ const main = async () => {
 
   if (dryRun) {
     console.log(`Repo: ${REPO}, base: ${BASE_BRANCH}, model: ${MODEL}`);
+
+    // The plan is only worth printing if it matches what a real run would do,
+    // so this mirrors the execution loop below: closed issues drop out, a wave
+    // with nothing left is skipped, and the run returns at the first wave whose
+    // remaining issues need human review. Costs one `gh issue view` per issue,
+    // resolved up front so no issue is queried twice.
+    const closed = new Set(waves.flat().filter((issue) => isClosed(issue)));
+    let halted = false;
+
     waves.forEach((wave, index) => {
-      const labelled = wave.map(
-        (issue) => `#${issue}${REVIEW_BY_HUMAN.has(issue) ? " (draft, human review)" : " (auto-merge)"}`,
-      );
-      const halts = wave.some((issue) => REVIEW_BY_HUMAN.has(issue));
-      console.log(`Wave ${index + 1}: ${labelled.join(", ")}${halts ? " — pipeline stops here" : ""}`);
+      const todo = wave.filter((issue) => !closed.has(issue));
+      const done = wave.filter((issue) => closed.has(issue));
+      const list = (issues: number[]) => issues.map((issue) => `#${issue}`).join(", ");
+
+      if (todo.length === 0) {
+        console.log(`Wave ${index + 1}: ${list(wave)} — already done, skipping`);
+        return;
+      }
+
+      const labelled = todo
+        .map((issue) => `#${issue}${REVIEW_BY_HUMAN.has(issue) ? " (draft, human review)" : " (auto-merge)"}`)
+        .join(", ");
+      const skipped = done.length > 0 ? ` (already done: ${list(done)})` : "";
+
+      // Everything after the halting wave is a plan for the *next* invocation,
+      // not this one. Saying so beats implying seven waves are about to run.
+      if (halted) {
+        console.log(`Wave ${index + 1}: ${labelled}${skipped} — not reached this run`);
+        return;
+      }
+
+      halted = todo.some((issue) => REVIEW_BY_HUMAN.has(issue));
+      console.log(`Wave ${index + 1}: ${labelled}${skipped}${halted ? " — pipeline stops here" : ""}`);
     });
     return;
   }
