@@ -109,6 +109,13 @@ const REPO = gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner
 const issueTitle = (issue: number) =>
   gh("issue", "view", String(issue), "--repo", REPO, "--json", "title", "-q", ".title");
 
+const issueBody = (issue: number) =>
+  gh("issue", "view", String(issue), "--repo", REPO, "--json", "body", "-q", ".body");
+
+/** Does this checkout already have a branch by this name? */
+const branchExists = (branch: string) =>
+  succeeds("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+
 /**
  * The pipeline halts at each human-review wave and is re-run afterwards, so it
  * has to be resumable: an issue closed by a merged pull request is already done.
@@ -132,6 +139,13 @@ const succeeds = (command: string, args: string[]): boolean => {
  */
 const implementIssue = async (issue: number, signal: AbortSignal): Promise<AgentRun> => {
   const branch = `agent/issue-${issue}`;
+  if (branchExists(branch)) {
+    throw new Error(
+      `Branch ${branch} already exists from an earlier run. Sandcastle ignores ` +
+        `baseBranch when the branch is already there, so this run would build on a ` +
+        `stale ${BASE_BRANCH}. Inspect it, then delete it with \`git branch -D ${branch}\`.`,
+    );
+  }
   const title = issueTitle(issue);
   log(issue, title);
   log(issue, `branch ${branch}, model ${MODEL}`);
@@ -145,9 +159,16 @@ const implementIssue = async (issue: number, signal: AbortSignal): Promise<Agent
       runtime: "node24",
     }),
     promptFile: `${process.cwd()}/.sandcastle/prompt.md`,
-    // Substituted on the host before the !`…` expressions run, so the prompt's
-    // own gh calls resolve against the same repo this script inferred.
-    promptArgs: { ISSUE_NUMBER: issue, REPO },
+    // The issue text is read here, on the host, under your own `gh` login, and
+    // substituted into the prompt. It cannot be read with a !`…` expression in
+    // prompt.md: those execute inside the sandbox, which deliberately has no
+    // GitHub token and no `gh` binary, and a non-zero exit aborts the run.
+    promptArgs: {
+      ISSUE_NUMBER: issue,
+      ISSUE_TITLE: title,
+      ISSUE_BODY: issueBody(issue),
+      PARENT_SPEC: issueBody(1),
+    },
     // Concurrent runs in the same wave must not share a branch. `head` and
     // `merge-to-head` are unsafe for concurrent work; a named branch per issue
     // is the only strategy that is.
@@ -164,7 +185,11 @@ const implementIssue = async (issue: number, signal: AbortSignal): Promise<Agent
           {
             command:
               "curl -fsSL https://claude.ai/install.sh | bash && " +
-              'sudo ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude || true',
+              '( ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude || ' +
+              'sudo ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude ) && ' +
+              // Proves the binary is on PATH. Without it a failed install is
+              // silent here and reappears as a confusing failure much later.
+              "claude --version",
             timeoutMs: 180_000,
           },
         ],
@@ -203,7 +228,16 @@ const rejections = (agentRun: AgentRun): string[] => {
     }
   }
 
-  git("checkout", branch);
+  try {
+    git("checkout", branch);
+  } catch {
+    problems.push(
+      `could not check out ${branch} on the host — Sandcastle preserves its worktree ` +
+        `when the agent leaves uncommitted changes, and that worktree still holds the ` +
+        `branch. Inspect .sandcastle/worktrees/, then \`git worktree remove --force\` it.`,
+    );
+    return problems;
+  }
 
   // `.sandcastle/` is the harness driving this run. The prompt tells agents not
   // to touch it; this is the part that actually enforces it.
@@ -308,12 +342,21 @@ const main = async () => {
     return;
   }
 
+  // This script moves BASE_BRANCH and checks out agent branches, so it has to
+  // own the checkout it runs in. Run it from the main clone, not from a git
+  // worktree — a worktree cannot check out a branch another one already holds.
+  const currentBranch = git("rev-parse", "--abbrev-ref", "HEAD");
+  if (currentBranch !== BASE_BRANCH) {
+    throw new Error(
+      `Run this from the main checkout with ${BASE_BRANCH} checked out; currently on '${currentBranch}'.`,
+    );
+  }
+
   if (git("status", "--porcelain") !== "") {
     throw new Error("Working tree is dirty. Commit or stash before running.");
   }
 
   git("fetch", "origin");
-  git("checkout", BASE_BRANCH);
   git("pull", "--ff-only", "origin", BASE_BRANCH);
 
   for (const [index, wave] of waves.entries()) {

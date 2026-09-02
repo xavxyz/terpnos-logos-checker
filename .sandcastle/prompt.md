@@ -5,9 +5,9 @@ autonomously, with no human available to answer questions.
 
 Issue number: {{ISSUE_NUMBER}}
 
-Title: !`gh issue view {{ISSUE_NUMBER}} --repo {{REPO}} --json title -q .title`
+Title: {{ISSUE_TITLE}}
 
-!`gh issue view {{ISSUE_NUMBER}} --repo {{REPO}} --json body -q .body`
+{{ISSUE_BODY}}
 
 ## The parent specification
 
@@ -15,7 +15,7 @@ Every issue is a slice of issue #1, which holds the decisions all slices share.
 Read it before you write any code; it is the authority when your issue is
 ambiguous.
 
-!`gh issue view 1 --repo {{REPO}} --json body -q .body`
+{{PARENT_SPEC}}
 
 ## Rules
 
