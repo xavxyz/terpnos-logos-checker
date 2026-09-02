@@ -13,8 +13,19 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { claudeCode, Output, run } from "@ai-hero/sandcastle";
-import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
+import { writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  claudeCode,
+  createIsolatedSandboxProvider,
+  Output,
+  run,
+  type IsolatedCreateOptions,
+  type IsolatedSandboxHandle,
+  type IsolatedSandboxProvider,
+} from "@ai-hero/sandcastle";
+import { vercel, type VercelOptions } from "@ai-hero/sandcastle/sandboxes/vercel";
 import { z } from "zod";
 
 const BASE_BRANCH = "master";
@@ -58,6 +69,63 @@ const SANDBOX_TIMEOUT_MS = 44 * 60 * 1000;
  * creation is paused until the billing cycle resets.
  */
 const VCPUS = 2;
+
+/**
+ * A Vercel sandbox provider that actually delivers stdin.
+ *
+ * `@ai-hero/sandcastle@0.12.0`'s Vercel provider drops `exec`'s `stdin` option
+ * on the floor: it never wires anything to `sandbox.runCommand`. The Claude
+ * Code provider passes the prompt as `claude … --print … -p -`, meaning "read
+ * the prompt from stdin" — so with stdin missing the agent is handed the
+ * literal string `-` and asks what you want it to do. That is not a
+ * misconfiguration of this harness; it is a broken contract, since
+ * `IsolatedSandboxHandle.exec` documents that `stdin` MUST be piped to the
+ * child. Every other provider honours it.
+ *
+ * The fix stays out of `node_modules`: write the stdin payload to a file inside
+ * the sandbox and redirect the command from it. The command is wrapped in a
+ * subshell so the redirection applies to the whole pipeline, not just its last
+ * segment.
+ *
+ * Delete this the day the upstream provider pipes stdin itself.
+ */
+const vercelWithStdin = (options: VercelOptions): IsolatedSandboxProvider => {
+  // `create` is part of the provider object but not of its public type; the
+  // config type is where it is declared.
+  const inner = vercel(options) as IsolatedSandboxProvider & {
+    create: (options: IsolatedCreateOptions) => Promise<IsolatedSandboxHandle>;
+  };
+
+  return createIsolatedSandboxProvider({
+    name: inner.name,
+    env: inner.env,
+    create: async (createOptions) => {
+      const handle = await inner.create(createOptions);
+      let payloadCount = 0;
+
+      return {
+        ...handle,
+        exec: async (command, execOptions) => {
+          if (execOptions?.stdin === undefined) return handle.exec(command, execOptions);
+
+          const { stdin, ...rest } = execOptions;
+          const name = `sandcastle-stdin-${process.pid}-${++payloadCount}`;
+          const hostPath = join(tmpdir(), name);
+          const sandboxPath = `/tmp/${name}`;
+
+          await writeFile(hostPath, stdin, "utf8");
+          try {
+            await handle.copyIn(hostPath, sandboxPath);
+          } finally {
+            await rm(hostPath, { force: true });
+          }
+
+          return handle.exec(`( ${command} ) < ${sandboxPath}`, rest);
+        },
+      };
+    },
+  });
+};
 
 /** The gates every issue must clear. Names fixed by issue #11. */
 const GATES = [
@@ -153,7 +221,7 @@ const implementIssue = async (issue: number, signal: AbortSignal): Promise<Agent
   const result = await run({
     name: `issue-${issue}`,
     agent: claudeCode(MODEL),
-    sandbox: vercel({
+    sandbox: vercelWithStdin({
       timeout: SANDBOX_TIMEOUT_MS,
       resources: { vcpus: VCPUS },
       runtime: "node24",
