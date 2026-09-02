@@ -1,0 +1,18 @@
+node_modules/
+.next/
+out/
+dist/
+.DS_Store
+
+# Vercel
+.vercel
+
+# Local env — never commit
+.env
+.env*.local
+.sandcastle/.env
+
+# Sandcastle working state
+.sandcastle/worktrees/
+.sandcastle/logs/
+.sandcastle/patches/

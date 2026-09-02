@@ -1,0 +1,67 @@
+# Sandcastle harness
+
+Drives the implementation of this repository's GitHub issues with Claude Code
+agents running in Vercel Sandbox microVMs.
+
+This directory is the orchestrator, not the application. Agents are told not to
+edit it, and editing it mid-run has no effect on a run already in flight.
+
+## How a run works
+
+1. The host reads the issue with `gh` and interpolates it into `prompt.md`.
+2. A fresh Vercel Sandbox starts; Claude Code is installed into it and given the
+   repository as a git clone.
+3. The agent implements the issue and must get `npm run typecheck`, `npm test`
+   and `npm run build` green **inside the sandbox**, then commits.
+4. The agent emits a `<verdict>` listing every acceptance criterion and whether
+   it met it.
+5. Sandcastle syncs the commits back to this checkout. The host pushes the
+   branch, opens a pull request, and — for issues not reserved for human review
+   — merges it.
+
+The sandbox never receives a GitHub token, the AssemblyAI key, or a Blob token.
+Everything that writes to GitHub runs on your machine under your own `gh` login.
+
+## Setup
+
+```bash
+cp .sandcastle/.env.example .sandcastle/.env
+claude setup-token          # paste the result as CLAUDE_CODE_OAUTH_TOKEN
+```
+
+Add a Vercel token to `.sandcastle/.env` as well. Then:
+
+```bash
+npm install
+npm run sandcastle -- --dry-run    # prints the plan, runs nothing
+npm run sandcastle -- --only 11    # scaffolding issue only
+npm run sandcastle                 # the whole pipeline
+```
+
+Run it from a clean working tree on `master`. The script refuses to start
+otherwise, because agents' commits are applied onto this checkout.
+
+## Start with one issue
+
+Run `--only 11` first and watch it. It is the cheapest way to find out whether
+the sandbox bootstrap works before spending the month's compute on six waves.
+
+## Things that will bite
+
+**The Claude install hook.** The Vercel provider ignores
+`.sandcastle/Dockerfile`, so `claude` is installed by an `onSandboxReady` hook
+in `main.mts` and symlinked onto `PATH`. If a run dies immediately with a
+command-not-found, that hook is what to fix. It is the one part of this harness
+that has not been executed against a real sandbox.
+
+**The compute budget, not the clock.** Vercel Hobby gives 5 Active-CPU-hours per
+month; when they are gone, sandbox creation is paused until the billing cycle
+resets. `npm install` and `next build` are what actually consume it — the agent
+waiting on model responses is nearly free. A 45-minute session cap also applies,
+and `main.mts` sets the timeout explicitly because the provider's own default is
+5 minutes.
+
+**Sync-out rewrites commit SHAs.** Commits come back through
+`git format-patch` / `git am --3way`. A long, divergent run can fail to apply
+cleanly. That looks like lost work but is not: the patches are on disk under
+`.sandcastle/patches/`.
