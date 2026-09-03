@@ -295,6 +295,83 @@ const branchExists = (branch: string) =>
   succeeds("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
 
 /**
+ * Where Sandcastle parks the worktree it keeps when an agent leaves
+ * uncommitted changes behind. Nothing outside this directory is a worktree
+ * this harness created, and so nothing outside it is a worktree this harness
+ * removes.
+ */
+const HARNESS_WORKTREES =
+  join(git("rev-parse", "--show-toplevel"), ".sandcastle", "worktrees") + "/";
+
+/**
+ * The worktree that currently has `branch` checked out, or `null`. Git refuses
+ * to delete a branch a worktree holds, and the porcelain listing is the only
+ * place that mapping is written down.
+ */
+const worktreeHolding = (branch: string): string | null => {
+  let path: string | null = null;
+
+  for (const line of git("worktree", "list", "--porcelain").split("\n")) {
+    if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
+    else if (line === `branch refs/heads/${branch}`) return path;
+  }
+
+  return null;
+};
+
+/**
+ * Where a superseded attempt's commits go: under `refs/sandcastle/`, not under
+ * `refs/heads/`. They stay fetchable — `git log <ref>`, `git checkout -b …
+ * <ref>` — while being out of the branch namespace, so they cannot be pushed
+ * by accident, do not clutter `git branch`, and cannot collide with the branch
+ * the next attempt cuts.
+ */
+const attemptRef = (issue: number) =>
+  `refs/sandcastle/attempts/issue-${issue}/${new Date().toISOString().replace(/[:.]/g, "-")}`;
+
+/**
+ * Make this issue's branch name available again, so a retry is just a re-run.
+ *
+ * Sandcastle ignores `baseBranch` when the branch already exists, which is why
+ * an earlier attempt's leftover branch cannot simply be reused: the new agent
+ * would build on whatever `master` looked like when the failed attempt
+ * started, and by then it is usually several merges stale. The branch has to go.
+ *
+ * This used to be the operator's job, announced as a `git branch -D` in the
+ * summary — but every failure then cost a manual step before the obvious next
+ * command would work at all, and the step was the same one every time. It is
+ * done here instead. The commits are not thrown away: they are first parked on a
+ * ref under `refs/sandcastle/attempts/` and the ref is printed, so a failed
+ * attempt worth salvaging still can be. Uncommitted changes in a preserved
+ * worktree are the one thing that does not survive, which is why removing one
+ * is announced rather than done quietly.
+ */
+const reclaimBranch = (issue: number): void => {
+  const branch = agentBranch(issue);
+  if (!branchExists(branch)) return;
+
+  const worktree = worktreeHolding(branch);
+  if (worktree !== null) {
+    // Only ever Sandcastle's own. A branch held by some worktree a human set up
+    // is a situation this cannot reason about, and removing it would take
+    // uncommitted work with it.
+    if (!worktree.startsWith(HARNESS_WORKTREES)) {
+      throw new Error(
+        `${branch} is checked out in the worktree at ${worktree}, which Sandcastle did ` +
+          `not create. Refusing to remove it — resolve it by hand, then run this again.`,
+      );
+    }
+    git("worktree", "remove", "--force", worktree);
+    log(issue, `removed the worktree ${worktree}; anything uncommitted in it is gone`);
+  }
+
+  const ref = attemptRef(issue);
+  git("update-ref", ref, `refs/heads/${branch}`);
+  git("branch", "-D", branch);
+  log(issue, `reclaimed ${branch} from an earlier attempt; its commits are kept at ${ref}`);
+};
+
+/**
  * The pipeline halts at each human-review wave and is re-run afterwards, so it
  * has to be resumable: an issue closed by a merged pull request is already done.
  */
@@ -395,14 +472,9 @@ const implementIssue = async (
   issue: number,
   credential: VercelCredential,
 ): Promise<AgentRun> => {
+  // Free of leftovers by the time this runs: `reclaimBranch` is the caller's
+  // first move on every issue it hands over.
   const branch = agentBranch(issue);
-  if (branchExists(branch)) {
-    throw new Error(
-      `Branch ${branch} already exists from an earlier run. Sandcastle ignores ` +
-        `baseBranch when the branch is already there, so this run would build on a ` +
-        `stale ${BASE_BRANCH}. Inspect it, then delete it with \`git branch -D ${branch}\`.`,
-    );
-  }
   const title = issueTitle(issue);
   log(issue, title);
   log(issue, `branch ${branch}, model ${MODEL}`);
@@ -640,16 +712,14 @@ const summarise = (outcomes: readonly Outcome[]): void => {
 
   if (leftovers.length > 0) {
     console.log(
-      `\nLeft behind:\n` +
+      `\nLeft behind, for you to read if you want to:\n` +
         leftovers
           .map((issue) => `  #${issue}: ${agentBranch(issue)}, ${agentLog(issue)}`)
           .join("\n") +
-        `\n\nInspect them, then delete the branches — Sandcastle ignores baseBranch when a\n` +
-        `branch already exists, so a re-run would otherwise build on a stale ${BASE_BRANCH}:\n` +
-        `  git branch -D ${leftovers.map(agentBranch).join(" ")}\n` +
-        `Should that be refused, the branch is still held by a worktree Sandcastle kept\n` +
-        `because the agent left uncommitted changes. Remove it from ` +
-        `.sandcastle/worktrees/ first.`,
+        `\n\nNo cleanup needed. The next run reclaims these branches itself — it has to,\n` +
+        `since Sandcastle ignores baseBranch when a branch already exists and would\n` +
+        `otherwise build on a stale ${BASE_BRANCH} — and parks their commits under\n` +
+        `refs/sandcastle/attempts/ first, naming the ref as it goes.`,
     );
   }
 
@@ -759,16 +829,34 @@ const main = async () => {
 
     if (todo.length === 0) continue;
 
+    // Before any agent starts, and one at a time: reclaiming moves refs and can
+    // remove a worktree, and a wave's agents running concurrently would race
+    // each other for the index lock. A branch that cannot be reclaimed fails
+    // only its own issue — the rest of the wave is unaffected by it.
+    const runnable: number[] = [];
+    for (const issue of todo) {
+      try {
+        reclaimBranch(issue);
+        runnable.push(issue);
+      } catch (error) {
+        const reason = describeError(error);
+        failed.add(issue);
+        outcomes.push({ kind: "failed", issue, phase: "agent", reason });
+        log(issue, `agent failed: ${reason}`);
+      }
+    }
+    if (runnable.length === 0) continue;
+
     // `allSettled`, not `all`: `all` rejects on the first failure and leaves its
     // siblings' rejections unhandled, which is what turned one dropped sandbox
     // stream into an uncaught exception that killed the whole pipeline.
     const settled = await Promise.allSettled(
-      todo.map((issue) => implementIssue(issue, credential)),
+      runnable.map((issue) => implementIssue(issue, credential)),
     );
 
     const agentRuns: AgentRun[] = [];
     for (const [position, result] of settled.entries()) {
-      const issue = todo[position]!;
+      const issue = runnable[position]!;
       if (result.status === "fulfilled") {
         agentRuns.push(result.value);
         continue;

@@ -82,12 +82,18 @@ first failure rather than guess.
 
 The run ends with a summary of what landed, what failed and what was skipped,
 and exits non-zero if anything failed. An agent that got as far as its own
-branch leaves it behind, and Sandcastle refuses to reuse an existing branch, so
-it has to go before you retry. The summary prints the exact command for the
-branches that are really there, along with the path to each failed agent's
-transcript under `.sandcastle/logs/`. If the deletion is refused, a worktree
-under `.sandcastle/worktrees/` still holds the branch — Sandcastle keeps one
-when the agent left uncommitted changes — and it has to be removed first.
+branch leaves it behind, along with its transcript under `.sandcastle/logs/`;
+both are named in the summary so you can read them.
+
+Neither needs cleaning up before you retry. Sandcastle ignores `baseBranch`
+when a branch already exists, so a leftover branch cannot be reused — the next
+run therefore reclaims it itself: it removes the worktree still holding it, if
+Sandcastle kept one because the agent left uncommitted changes, parks the
+branch's commits on a ref under `refs/sandcastle/attempts/issue-N/`, and cuts a
+fresh branch from `master`. The ref is printed as it goes, so a failed attempt
+worth salvaging survives (`git log <ref>`, `git checkout -b … <ref>`);
+uncommitted changes in a removed worktree do not. A branch held by a worktree
+Sandcastle did not create is left strictly alone and fails that issue instead.
 
 ## It stops on purpose
 
