@@ -29,6 +29,8 @@ import {
 import { vercel, type VercelOptions } from "@ai-hero/sandcastle/sandboxes/vercel";
 import { z } from "zod";
 
+import { planWave, type Blockers } from "./plan.mts";
+
 const BASE_BRANCH = "master";
 const MODEL = process.env.SANDCASTLE_MODEL ?? "claude-opus-5";
 
@@ -42,6 +44,11 @@ const MODEL = process.env.SANDCASTLE_MODEL ?? "claude-opus-5";
  *
  * #9 and #10 are deliberately sequential despite both depending only on #8:
  * they both edit the report UI and would collide.
+ *
+ * This is an execution order, not a statement of what depends on what. When an
+ * agent fails, the pipeline needs to know which *other* issues that invalidates,
+ * and it reads that from GitHub's issue dependencies rather than inferring it
+ * from position in this list — see `readBlockers`.
  */
 const WAVES: number[][] = [[11], [2, 3], [6, 4], [7], [8], [9], [10]];
 
@@ -289,6 +296,65 @@ const succeeds = (command: string, args: string[]): boolean => {
   }
 };
 
+const describeError = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/**
+ * The dependency graph, read from GitHub's native issue dependencies.
+ *
+ * `docs/agents/issue-tracker.md` names these the canonical, UI-visible
+ * representation of blocking, so they are read rather than restated here: a
+ * second copy in this file would drift the first time an edge is added in the
+ * GitHub UI, and it would drift silently.
+ *
+ * Follows edges out of the requested issues so the graph is complete even under
+ * `--only`, where the waves name one issue but its blockers reach further back.
+ *
+ * Returns `null` when any lookup fails — the endpoint is comparatively new and
+ * a repository may not have it. A partial graph is worse than none: it would
+ * report an issue as safe to build when its blocker had in fact just died, so
+ * the caller degrades to halting the run instead.
+ */
+const readBlockers = (issues: readonly number[]): Blockers | null => {
+  const blockers = new Map<number, readonly number[]>();
+  const queue = [...issues];
+
+  while (queue.length > 0) {
+    const issue = queue.shift()!;
+    if (blockers.has(issue)) continue;
+
+    let listed: number[];
+    try {
+      listed = JSON.parse(
+        gh("api", `repos/${REPO}/issues/${issue}/dependencies/blocked_by`, "--jq", "[.[].number]"),
+      ) as number[];
+    } catch (error) {
+      console.warn(
+        `Could not read GitHub issue dependencies for #${issue} (${describeError(error)}).\n` +
+          `Without the graph this run cannot tell which issues a failure invalidates, so ` +
+          `it will stop at the first failure rather than skip only the affected work.`,
+      );
+      return null;
+    }
+
+    blockers.set(issue, listed);
+    queue.push(...listed);
+  }
+
+  return blockers;
+};
+
+/** What became of one issue in this run. */
+type Outcome =
+  | { readonly kind: "landed"; readonly issue: number; readonly prUrl: string }
+  | {
+      readonly kind: "failed";
+      readonly issue: number;
+      readonly phase: "agent" | "landing";
+      readonly reason: string;
+    }
+  | { readonly kind: "skipped"; readonly issue: number; readonly by: readonly number[] };
+
 /**
  * Phase one: implement the issue in a sandbox. Deliberately does no host git
  * work beyond what Sandcastle itself does on its own named branch, because the
@@ -296,7 +362,6 @@ const succeeds = (command: string, args: string[]): boolean => {
  */
 const implementIssue = async (
   issue: number,
-  signal: AbortSignal,
   credential: VercelCredential,
 ): Promise<AgentRun> => {
   const branch = `agent/issue-${issue}`;
@@ -336,9 +401,13 @@ const implementIssue = async (
     // `merge-to-head` are unsafe for concurrent work; a named branch per issue
     // is the only strategy that is.
     branchStrategy: { type: "branch", branch, baseBranch: BASE_BRANCH },
-    // One failure in a wave cancels its siblings rather than letting them keep
-    // burning the month's compute budget.
-    signal,
+    // Deliberately no abort signal. An earlier version cancelled a wave's
+    // remaining agents as soon as one failed, to protect the month's compute
+    // budget. That trade is the wrong way round: the common failure here is
+    // infrastructural and unrelated to the work — a dropped sandbox exec
+    // stream, say — and killing a sibling that is minutes from committing
+    // guarantees nothing is salvaged from compute already spent. Each sandbox
+    // caps itself at SANDBOX_TIMEOUT_MS, so the exposure is bounded anyway.
     hooks: {
       sandbox: {
         onSandboxReady: [
@@ -477,6 +546,76 @@ const land = async (agentRun: AgentRun): Promise<string> => {
   return prUrl;
 };
 
+/**
+ * `land` checks out the agent's branch to re-run the gates and only returns to
+ * `BASE_BRANCH` once it has succeeded. Now that a failure no longer ends the
+ * process, everything after it — the next issue in the wave, the next wave —
+ * would inherit whatever branch the failure left behind.
+ */
+const restoreBaseBranch = (): boolean => {
+  try {
+    git("checkout", BASE_BRANCH);
+    return true;
+  } catch (error) {
+    console.error(
+      `Could not return to ${BASE_BRANCH} after a failed landing ` +
+        `(${describeError(error)}). Stopping rather than running the rest of the ` +
+        `pipeline against an unknown checkout.`,
+    );
+    return false;
+  }
+};
+
+/**
+ * The end-of-run account. Printed even when everything worked, because "which
+ * pull requests did this open" is the question asked every time, and printed
+ * especially when things did not: a failed agent leaves its branch behind and
+ * the next run refuses to reuse it, so the cleanup command belongs here rather
+ * than in the reader's memory.
+ */
+const report = (outcomes: readonly Outcome[]): void => {
+  // A run where every issue was already closed has nothing to account for, and
+  // an empty summary reads like something went missing.
+  if (outcomes.length === 0) return;
+
+  const list = (issues: readonly number[]) => issues.map((issue) => `#${issue}`).join(", ");
+
+  console.log("\n=== Summary ===");
+
+  for (const outcome of outcomes) {
+    switch (outcome.kind) {
+      case "landed":
+        console.log(`  #${outcome.issue} landed — ${outcome.prUrl}`);
+        break;
+      case "failed":
+        console.log(`  #${outcome.issue} failed in the ${outcome.phase} phase — ${outcome.reason}`);
+        break;
+      case "skipped":
+        console.log(`  #${outcome.issue} skipped — waits on ${list(outcome.by)}`);
+        break;
+    }
+  }
+
+  const failures = outcomes.filter((outcome) => outcome.kind === "failed");
+  if (failures.length === 0) return;
+
+  const branches = failures.map((failure) => `agent/issue-${failure.issue}`);
+  console.log(
+    `\nEach failed issue left its branch and its transcript behind:\n` +
+      failures
+        .map(
+          (failure) =>
+            `  #${failure.issue}: agent/issue-${failure.issue}, ` +
+            `.sandcastle/logs/agent-issue-${failure.issue}-issue-${failure.issue}.log`,
+        )
+        .join("\n") +
+      `\n\nInspect them, then delete the branches — Sandcastle ignores baseBranch when a\n` +
+      `branch already exists, so a re-run would otherwise build on a stale ${BASE_BRANCH}:\n` +
+      `  git branch -D ${branches.join(" ")}\n` +
+      `Then run this again to retry ${list(failures.map((failure) => failure.issue))}.`,
+  );
+};
+
 const main = async () => {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
@@ -505,9 +644,12 @@ const main = async () => {
     let halted = false;
 
     waves.forEach((wave, index) => {
-      const todo = wave.filter((issue) => !closed.has(issue));
-      const done = wave.filter((issue) => closed.has(issue));
-      const list = (issues: number[]) => issues.map((issue) => `#${issue}`).join(", ");
+      // Planned through the same function the run uses, so the two cannot
+      // disagree. Nothing has failed in a dry run, which is also why the
+      // dependency graph is not worth fetching here.
+      const { todo, skipped } = planWave(wave, { closed, failed: new Set(), blockers: null });
+      const done = [...skipped.keys()];
+      const list = (issues: readonly number[]) => issues.map((issue) => `#${issue}`).join(", ");
 
       if (todo.length === 0) {
         console.log(`Wave ${index + 1}: ${list(wave)} — already done, skipping`);
@@ -517,17 +659,17 @@ const main = async () => {
       const labelled = todo
         .map((issue) => `#${issue}${REVIEW_BY_HUMAN.has(issue) ? " (draft, human review)" : " (auto-merge)"}`)
         .join(", ");
-      const skipped = done.length > 0 ? ` (already done: ${list(done)})` : "";
+      const alreadyDone = done.length > 0 ? ` (already done: ${list(done)})` : "";
 
       // Everything after the halting wave is a plan for the *next* invocation,
       // not this one. Saying so beats implying seven waves are about to run.
       if (halted) {
-        console.log(`Wave ${index + 1}: ${labelled}${skipped} — not reached this run`);
+        console.log(`Wave ${index + 1}: ${labelled}${alreadyDone} — not reached this run`);
         return;
       }
 
       halted = todo.some((issue) => REVIEW_BY_HUMAN.has(issue));
-      console.log(`Wave ${index + 1}: ${labelled}${skipped}${halted ? " — pipeline stops here" : ""}`);
+      console.log(`Wave ${index + 1}: ${labelled}${alreadyDone}${halted ? " — pipeline stops here" : ""}`);
     });
     return;
   }
@@ -551,32 +693,76 @@ const main = async () => {
   git("fetch", "origin");
   git("pull", "--ff-only", "origin", BASE_BRANCH);
 
+  const blockers = readBlockers(waves.flat());
+  const outcomes: Outcome[] = [];
+  const failed = new Set<number>();
+  let stopped: "review" | "checkout" | null = null;
+
   for (const [index, wave] of waves.entries()) {
-    const todo = wave.filter((issue) => !isClosed(issue));
-    if (todo.length === 0) {
-      console.log(`\n=== Wave ${index + 1}/${waves.length}: already done, skipping ===`);
-      continue;
+    const closed = new Set(wave.filter((issue) => isClosed(issue)));
+    const { todo, skipped } = planWave(wave, { closed, failed, blockers });
+    const label = `\n=== Wave ${index + 1}/${waves.length}:`;
+
+    if (todo.length > 0) {
+      console.log(`${label} ${todo.map((n) => `#${n}`).join(", ")} ===`);
+    } else if ([...skipped.values()].every((skip) => skip.kind === "done")) {
+      console.log(`${label} already done, skipping ===`);
+    } else {
+      console.log(`${label} nothing runnable ===`);
     }
 
-    console.log(`\n=== Wave ${index + 1}/${waves.length}: ${todo.map((n) => `#${n}`).join(", ")} ===`);
+    for (const [issue, skip] of skipped) {
+      if (skip.kind !== "blocked") continue;
+      const causes = skip.by.map((n) => `#${n}`).join(", ");
+      log(issue, `skipped: depends on ${causes}, which did not land in this run`);
+      outcomes.push({ kind: "skipped", issue, by: skip.by });
+    }
 
-    const controller = new AbortController();
-    let agentRuns: AgentRun[];
-    try {
-      agentRuns = await Promise.all(
-        todo.map((issue) => implementIssue(issue, controller.signal, credential)),
-      );
-    } catch (error) {
-      controller.abort();
-      throw error;
+    if (todo.length === 0) continue;
+
+    // `allSettled`, not `all`: `all` rejects on the first failure and leaves its
+    // siblings' rejections unhandled, which is what turned one dropped sandbox
+    // stream into an uncaught exception that killed the whole pipeline.
+    const settled = await Promise.allSettled(
+      todo.map((issue) => implementIssue(issue, credential)),
+    );
+
+    const agentRuns: AgentRun[] = [];
+    for (const [position, result] of settled.entries()) {
+      const issue = todo[position]!;
+      if (result.status === "fulfilled") {
+        agentRuns.push(result.value);
+        continue;
+      }
+      failed.add(issue);
+      const reason = describeError(result.reason);
+      outcomes.push({ kind: "failed", issue, phase: "agent", reason });
+      log(issue, `agent failed: ${reason}`);
     }
 
     // Serialized: each of these checks out branches and moves master.
+    const landed: number[] = [];
     for (const agentRun of agentRuns) {
-      await land(agentRun);
+      try {
+        outcomes.push({ kind: "landed", issue: agentRun.issue, prUrl: await land(agentRun) });
+        landed.push(agentRun.issue);
+      } catch (error) {
+        failed.add(agentRun.issue);
+        const reason = describeError(error);
+        outcomes.push({ kind: "failed", issue: agentRun.issue, phase: "landing", reason });
+        log(agentRun.issue, `not landed: ${reason}`);
+        if (!restoreBaseBranch()) {
+          stopped = "checkout";
+          break;
+        }
+      }
     }
+    if (stopped) break;
 
-    const awaitingReview = todo.filter((issue) => REVIEW_BY_HUMAN.has(issue));
+    // Only issues that actually landed can be waiting on a review. One that
+    // failed leaves nothing to review, and the work depending on it is skipped
+    // by `planWave` in the waves below.
+    const awaitingReview = landed.filter((issue) => REVIEW_BY_HUMAN.has(issue));
     if (awaitingReview.length > 0) {
       console.log(
         `\nStopping: ${awaitingReview.map((n) => `#${n}`).join(", ")} ` +
@@ -584,11 +770,22 @@ const main = async () => {
           `Merge the draft PR${awaitingReview.length === 1 ? "" : "s"}, then run this again — ` +
           `later waves branch from ${BASE_BRANCH} and need that work landed first.`,
       );
-      return;
+      stopped = "review";
+      break;
     }
   }
 
-  console.log("\nPipeline complete.");
+  report(outcomes);
+
+  if (failed.size > 0) {
+    // A non-zero exit matters now that the process no longer crashes on a
+    // failed agent: without it a partially failed run looks like a clean one to
+    // anything reading the exit code.
+    process.exitCode = 1;
+    return;
+  }
+
+  if (stopped === null) console.log("\nPipeline complete.");
 };
 
 await main();

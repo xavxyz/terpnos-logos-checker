@@ -4,7 +4,15 @@ Drives the implementation of this repository's GitHub issues with Claude Code
 agents running in Vercel Sandbox microVMs.
 
 This directory is the orchestrator, not the application. Agents are told not to
-edit it, and editing it mid-run has no effect on a run already in flight.
+edit it, and editing it mid-run has no effect on a run already in flight. It
+keeps its own `tsconfig.json` and its own test run for the same reason — the
+application's gates are what agents must clear, and the harness has no business
+in them:
+
+```bash
+npm run sandcastle:check   # typecheck the orchestrator
+npm run sandcastle:test    # its scheduling rules
+```
 
 ## How a run works
 
@@ -57,6 +65,26 @@ otherwise, because agents' commits are applied onto this checkout.
 
 `SANDCASTLE_MODEL` overrides the model if you want to trade quality for compute
 on a wave you are less worried about.
+
+## When an agent fails
+
+One agent dying no longer ends the run. Its siblings in the same wave are left
+to finish, whatever they produce is landed as usual, and the failure is recorded
+against that issue.
+
+What happens next depends on what actually needed that issue. The waves above
+are an execution order, not a dependency graph; the real one lives in GitHub's
+native issue dependencies, which `main.mts` reads at startup. Only the issues
+that transitively depend on a failure are skipped — if the Blob upload (#6) dies
+the whole I/O chain below it stands down, while the comparison chain (#4) runs
+to completion. If those dependencies cannot be read at all, the run stops at the
+first failure rather than guess.
+
+The run ends with a summary of what landed, what failed and what was skipped,
+and exits non-zero if anything failed. A failed issue leaves its branch behind
+and Sandcastle refuses to reuse an existing branch, so delete it before
+retrying — the summary prints the exact command, along with the path to each
+failed agent's transcript under `.sandcastle/logs/`.
 
 ## It stops on purpose
 

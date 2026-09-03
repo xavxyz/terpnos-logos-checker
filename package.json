@@ -14,7 +14,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "sandcastle": "tsx --env-file-if-exists=.env --env-file-if-exists=.sandcastle/.env .sandcastle/main.mts",
-    "sandcastle:check": "tsc -p .sandcastle/tsconfig.json"
+    "sandcastle:check": "tsc -p .sandcastle/tsconfig.json",
+    "sandcastle:test": "vitest run --config .sandcastle/vitest.config.mts"
   },
   "devDependencies": {
     "@ai-hero/sandcastle": "^0.12.0",
