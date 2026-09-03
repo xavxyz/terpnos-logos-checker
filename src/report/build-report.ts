@@ -33,6 +33,8 @@ const STYLES = `
   .omission {
     color: #c0392b;
     font-weight: 700;
+    /* Every difference carries its moment: clicking one seeks the player. */
+    cursor: pointer;
   }
   .omission {
     text-decoration: line-through;

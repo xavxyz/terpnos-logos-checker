@@ -57,6 +57,9 @@ export function SubmissionForm() {
   const [motsReconnus, setMotsReconnus] = useState(0);
   /** The report, exactly as the comparison seam returned it. */
   const [rapport, setRapport] = useState<string | null>(null);
+  // The recording the report is about, kept so the player can play it. The
+  // store no longer holds it: what plays is the very file that was dropped.
+  const [ecoute, setEcoute] = useState<File | null>(null);
 
   // The recording currently in the store, if any. Held in a ref so the page can
   // still name it when it is unloaded in the middle of an upload.
@@ -161,6 +164,7 @@ export function SubmissionForm() {
     setRefus(null);
     setAvertissement(null);
     setRapport(null);
+    setEcoute(null);
     setProgression(0);
     setAvancement("envoi");
 
@@ -238,6 +242,7 @@ export function SubmissionForm() {
     }
 
     setRapport(compare);
+    setEcoute(recording);
     setAvancement("rapport");
   }
 
@@ -347,7 +352,9 @@ export function SubmissionForm() {
         )}
       </form>
 
-      {rapport ? <Rapport rapport={rapport} /> : null}
+      {rapport && ecoute ? (
+        <Rapport rapport={rapport} enregistrement={ecoute} />
+      ) : null}
     </main>
   );
 }
@@ -390,16 +397,41 @@ function ListeEtapes({
 }
 
 /**
- * The report, in the page. It is a self-contained document with its own styles,
- * so it is shown as the document it is and nothing about it is recomputed or
- * reshaped here: the frame receives the very string the comparison returned.
+ * The report, in the page, and the player beside it. The report is a
+ * self-contained document with its own styles, so it is shown as the document
+ * it is and nothing about it is recomputed or reshaped here: the frame receives
+ * the very string the comparison returned.
  *
  * Scripts are refused inside it, and it is sized to its own content so the
- * sophrologist scrolls the page rather than a box within it.
+ * sophrologist scrolls the page rather than a box within it. The player stays
+ * pinned to the top of the report, so a long session is read and listened to at
+ * once, and clicking any difference seeks it to that moment of the recording.
  */
-function Rapport({ rapport }: { rapport: string }) {
+function Rapport({
+  rapport,
+  enregistrement,
+}: {
+  rapport: string;
+  enregistrement: File;
+}) {
   const cadre = useRef<HTMLIFrameElement>(null);
+  const lecteur = useRef<HTMLAudioElement>(null);
   const [hauteur, setHauteur] = useState<number>();
+
+  useEffect(() => {
+    const audio = lecteur.current;
+
+    if (!audio) return;
+
+    // The store no longer holds the recording — it was deleted as soon as the
+    // transcript came back — so what plays is the very file that was dropped,
+    // straight from the browser, never sent anywhere.
+    const adresse = URL.createObjectURL(enregistrement);
+
+    audio.src = adresse;
+
+    return () => URL.revokeObjectURL(adresse);
+  }, [enregistrement]);
 
   const mesurer = useCallback(() => {
     // The body of the report is as tall as the terpnos logos it holds, and no
@@ -408,6 +440,49 @@ function Rapport({ rapport }: { rapport: string }) {
 
     if (corps) setHauteur(corps.scrollHeight);
   }, []);
+
+  /** Seek the player to a moment of the recording, as the seam gives it: ms. */
+  const ecouter = useCallback((moment: number) => {
+    const audio = lecteur.current;
+
+    if (!audio) return;
+
+    const chercher = () => {
+      audio.currentTime = moment / 1000;
+      // Play from there: the point is to hear what was actually said.
+      void audio.play().catch(() => undefined);
+    };
+
+    // Seeking a recording whose length the browser does not know yet is
+    // ignored, so a click landing that early waits for it to be known.
+    if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) chercher();
+    else audio.addEventListener("loadedmetadata", chercher, { once: true });
+  }, []);
+
+  const preparer = useCallback(() => {
+    mesurer();
+
+    const document = cadre.current?.contentDocument;
+
+    if (!document) return;
+
+    // The page listens to the report from the outside: the document stays
+    // script-free, and remains exactly what can be copied out or downloaded.
+    // A new report loads a new document, which takes this listener with it.
+    document.addEventListener("click", (evenement) => {
+      const marque = (evenement.target as Element | null)?.closest?.(
+        "[data-start]",
+      );
+
+      if (!marque) return;
+
+      const moment = Number(marque.getAttribute("data-start"));
+
+      if (!Number.isFinite(moment)) return;
+
+      ecouter(moment);
+    });
+  }, [mesurer, ecouter]);
 
   useEffect(() => {
     const iframe = cadre.current;
@@ -429,6 +504,18 @@ function Rapport({ rapport }: { rapport: string }) {
         vous avez dit sans l’avoir écrit ; en rouge gras barré, ce que vous avez
         écrit sans le dire ; en gris italique, ce qui n’était pas à lire.
       </p>
+      <div className="lecteur">
+        <audio
+          ref={lecteur}
+          className="lecteur__audio"
+          controls
+          preload="metadata"
+          aria-label="Enregistrement de la séance"
+        />
+        <p>
+          Cliquez une différence pour écouter ce moment de l’enregistrement.
+        </p>
+      </div>
       <iframe
         ref={cadre}
         className="rapport__cadre"
@@ -436,7 +523,7 @@ function Rapport({ rapport }: { rapport: string }) {
         sandbox="allow-same-origin"
         srcDoc={rapport}
         style={hauteur ? { height: `${hauteur}px` } : undefined}
-        onLoad={mesurer}
+        onLoad={preparer}
       />
     </section>
   );
