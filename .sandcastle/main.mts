@@ -14,8 +14,6 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   claudeCode,
@@ -29,6 +27,7 @@ import {
 import { vercel, type VercelOptions } from "@ai-hero/sandcastle/sandboxes/vercel";
 import { z } from "zod";
 
+import { detachedExec } from "./detached-exec.mts";
 import { planWave, type Blockers } from "./plan.mts";
 
 const BASE_BRANCH = "master";
@@ -77,23 +76,43 @@ const SANDBOX_TIMEOUT_MS = 44 * 60 * 1000;
 const VCPUS = 2;
 
 /**
- * A Vercel sandbox provider that actually delivers stdin.
+ * How often the host asks the sandbox whether the agent has finished.
  *
- * `@ai-hero/sandcastle@0.12.0`'s Vercel provider drops `exec`'s `stdin` option
- * on the floor: it never wires anything to `sandbox.runCommand`. The Claude
- * Code provider passes the prompt as `claude … --print … -p -`, meaning "read
- * the prompt from stdin" — so with stdin missing the agent is handed the
+ * Every poll is a fresh sub-second request, so this is the only thing standing
+ * between a long run and an idle-timeout kill. Five seconds keeps the live log
+ * feeling live and the request count negligible against a run measured in
+ * tens of minutes.
+ */
+const AGENT_POLL_INTERVAL_MS = 5_000;
+
+/**
+ * A Vercel sandbox provider that delivers stdin and survives a dropped stream.
+ *
+ * Two upstream defects meet on the same command — the one that runs the agent.
+ *
+ * First, `@ai-hero/sandcastle@0.12.0`'s Vercel provider drops `exec`'s `stdin`
+ * option on the floor: it never wires anything to `sandbox.runCommand`. The
+ * Claude Code provider passes the prompt as `claude … --print … -p -`, meaning
+ * "read the prompt from stdin" — so with stdin missing the agent is handed the
  * literal string `-` and asks what you want it to do. That is not a
  * misconfiguration of this harness; it is a broken contract, since
  * `IsolatedSandboxHandle.exec` documents that `stdin` MUST be piped to the
  * child. Every other provider honours it.
  *
- * The fix stays out of `node_modules`: write the stdin payload to a file inside
- * the sandbox and redirect the command from it. The command is wrapped in a
- * subshell so the redirection applies to the whole pipeline, not just its last
- * segment.
+ * Second, `@vercel/sandbox`'s `runCommand({ wait: true })` keeps a single HTTP
+ * stream open for the command's entire life and reads exactly two chunks from
+ * it — one at launch, one at exit. For an agent that socket is silent for an
+ * hour, and anything on the path with an idle timeout eventually closes it.
+ * That surfaces as `exec failed: terminated` or `Stream ended before command
+ * finished`, both of which killed issue #6 three times over while the sandbox
+ * was still working perfectly. See `detached-exec.mts`.
  *
- * Delete this the day the upstream provider pipes stdin itself.
+ * Both fixes stay out of `node_modules`, and both apply to exactly the commands
+ * that carry `stdin` — which, here, means the agent and nothing else. Short
+ * commands keep the direct path, where a held-open stream costs nothing.
+ *
+ * Delete this the day the upstream provider pipes stdin and stops betting an
+ * hour of work on one uninterrupted socket.
  */
 const vercelWithStdin = (options: VercelOptions): IsolatedSandboxProvider => {
   // `create` is part of the provider object but not of its public type; the
@@ -107,26 +126,16 @@ const vercelWithStdin = (options: VercelOptions): IsolatedSandboxProvider => {
     env: inner.env,
     create: async (createOptions) => {
       const handle = await inner.create(createOptions);
-      let payloadCount = 0;
 
       return {
         ...handle,
         exec: async (command, execOptions) => {
           if (execOptions?.stdin === undefined) return handle.exec(command, execOptions);
 
-          const { stdin, ...rest } = execOptions;
-          const name = `sandcastle-stdin-${process.pid}-${++payloadCount}`;
-          const hostPath = join(tmpdir(), name);
-          const sandboxPath = `/tmp/${name}`;
-
-          await writeFile(hostPath, stdin, "utf8");
-          try {
-            await handle.copyIn(hostPath, sandboxPath);
-          } finally {
-            await rm(hostPath, { force: true });
-          }
-
-          return handle.exec(`( ${command} ) < ${sandboxPath}`, rest);
+          return detachedExec(handle, command, execOptions, {
+            pollIntervalMs: AGENT_POLL_INTERVAL_MS,
+            timeoutMs: SANDBOX_TIMEOUT_MS,
+          });
         },
       };
     },

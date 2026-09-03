@@ -123,6 +123,15 @@ waiting on model responses is nearly free. A 45-minute session cap also applies,
 and `main.mts` sets the timeout explicitly because the provider's own default is
 5 minutes.
 
+**A dropped agent stream is not a failed agent.** `@vercel/sandbox` runs a
+command by holding one HTTP stream open from launch to exit and reading two
+chunks from it. For an agent that socket is silent for an hour, so an idle
+timeout anywhere on the path closes it and the run dies with `exec failed:
+terminated` or `Stream ended before command finished` — while the sandbox is
+still working. `detached-exec.mts` takes the agent off that socket: the command
+runs detached inside the sandbox and the host polls for its exit code, so every
+request is sub-second and a failed poll is simply retried.
+
 **Sync-out rewrites commit SHAs.** Commits come back through
 `git format-patch` / `git am --3way`. A long, divergent run can fail to apply
 cleanly. That looks like lost work but is not: the patches are on disk under
