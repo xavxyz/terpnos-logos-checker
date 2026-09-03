@@ -23,12 +23,8 @@ export interface WavePlan {
 }
 
 /**
- * `issue` -> the issues that must land before it can be built.
- *
- * Read from GitHub's native issue dependencies, which
- * `docs/agents/issue-tracker.md` names the canonical, UI-visible
- * representation. Deriving it beats hardcoding a second copy here that would
- * drift the first time a dependency is added in the GitHub UI.
+ * `issue` -> the issues that must land before it can be built. Where it comes
+ * from is `readBlockers`'s business in `main.mts`; this module only walks it.
  */
 export type Blockers = ReadonlyMap<number, readonly number[]>;
 

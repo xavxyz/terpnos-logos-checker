@@ -81,10 +81,13 @@ to completion. If those dependencies cannot be read at all, the run stops at the
 first failure rather than guess.
 
 The run ends with a summary of what landed, what failed and what was skipped,
-and exits non-zero if anything failed. A failed issue leaves its branch behind
-and Sandcastle refuses to reuse an existing branch, so delete it before
-retrying — the summary prints the exact command, along with the path to each
-failed agent's transcript under `.sandcastle/logs/`.
+and exits non-zero if anything failed. An agent that got as far as its own
+branch leaves it behind, and Sandcastle refuses to reuse an existing branch, so
+it has to go before you retry. The summary prints the exact command for the
+branches that are really there, along with the path to each failed agent's
+transcript under `.sandcastle/logs/`. If the deletion is refused, a worktree
+under `.sandcastle/worktrees/` still holds the branch — Sandcastle keeps one
+when the agent left uncommitted changes — and it has to be removed first.
 
 ## It stops on purpose
 

@@ -45,10 +45,8 @@ const MODEL = process.env.SANDCASTLE_MODEL ?? "claude-opus-5";
  * #9 and #10 are deliberately sequential despite both depending only on #8:
  * they both edit the report UI and would collide.
  *
- * This is an execution order, not a statement of what depends on what. When an
- * agent fails, the pipeline needs to know which *other* issues that invalidates,
- * and it reads that from GitHub's issue dependencies rather than inferring it
- * from position in this list — see `readBlockers`.
+ * This is an execution order, not a statement of what depends on what — which a
+ * failing agent makes the pipeline need to know. See `readBlockers`.
  */
 const WAVES: number[][] = [[11], [2, 3], [6, 4], [7], [8], [9], [10]];
 
@@ -267,6 +265,22 @@ const gh = (...args: string[]) =>
 const log = (issue: number, message: string) =>
   console.log(`[#${issue}] ${message}`);
 
+const list = (issues: readonly number[]) => issues.map((issue) => `#${issue}`).join(", ");
+
+/**
+ * One definition, because the end-of-run summary tells you to `git branch -D`
+ * these: a second copy of the pattern that drifted would print a command that
+ * deletes the wrong thing, or nothing.
+ */
+const agentBranch = (issue: number) => `agent/issue-${issue}`;
+
+/**
+ * Where Sandcastle writes an agent's transcript. The doubled segment is its
+ * own convention — `agent-<run name>-<agent name>` where both are `issue-N` —
+ * observed from the files it produces, not documented anywhere.
+ */
+const agentLog = (issue: number) => `.sandcastle/logs/agent-issue-${issue}-issue-${issue}.log`;
+
 /** Inferred from the checkout rather than hardcoded, per docs/agents/issue-tracker.md. */
 const REPO = gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner");
 
@@ -298,6 +312,23 @@ const succeeds = (command: string, args: string[]): boolean => {
 
 const describeError = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+/**
+ * The pull request a branch produced. Only used to label an issue whose pull
+ * request merged but whose run stopped immediately afterwards, which is why it
+ * degrades to a bare note rather than throwing: the run is already reporting
+ * one failure and a second one from the lookup would bury it.
+ */
+const mergedPrUrl = (branch: string): string => {
+  try {
+    return (
+      gh("pr", "list", "--repo", REPO, "--head", branch, "--state", "all", "--json", "url", "-q", ".[0].url") ||
+      "merged (pull request URL unavailable)"
+    );
+  } catch {
+    return "merged (pull request URL unavailable)";
+  }
+};
 
 /**
  * The dependency graph, read from GitHub's native issue dependencies.
@@ -364,7 +395,7 @@ const implementIssue = async (
   issue: number,
   credential: VercelCredential,
 ): Promise<AgentRun> => {
-  const branch = `agent/issue-${issue}`;
+  const branch = agentBranch(issue);
   if (branchExists(branch)) {
     throw new Error(
       `Branch ${branch} already exists from an earlier run. Sandcastle ignores ` +
@@ -569,16 +600,17 @@ const restoreBaseBranch = (): boolean => {
 /**
  * The end-of-run account. Printed even when everything worked, because "which
  * pull requests did this open" is the question asked every time, and printed
- * especially when things did not: a failed agent leaves its branch behind and
- * the next run refuses to reuse it, so the cleanup command belongs here rather
- * than in the reader's memory.
+ * especially when things did not: a failed issue usually leaves a branch the
+ * next run refuses to reuse, so the cleanup belongs here rather than in the
+ * reader's memory.
+ *
+ * Named `summarise` rather than `report` because CONTEXT.md reserves "report"
+ * for the application's own output, the marked-up terpnos logos.
  */
-const report = (outcomes: readonly Outcome[]): void => {
+const summarise = (outcomes: readonly Outcome[]): void => {
   // A run where every issue was already closed has nothing to account for, and
   // an empty summary reads like something went missing.
   if (outcomes.length === 0) return;
-
-  const list = (issues: readonly number[]) => issues.map((issue) => `#${issue}`).join(", ");
 
   console.log("\n=== Summary ===");
 
@@ -599,21 +631,29 @@ const report = (outcomes: readonly Outcome[]): void => {
   const failures = outcomes.filter((outcome) => outcome.kind === "failed");
   if (failures.length === 0) return;
 
-  const branches = failures.map((failure) => `agent/issue-${failure.issue}`);
-  console.log(
-    `\nEach failed issue left its branch and its transcript behind:\n` +
-      failures
-        .map(
-          (failure) =>
-            `  #${failure.issue}: agent/issue-${failure.issue}, ` +
-            `.sandcastle/logs/agent-issue-${failure.issue}-issue-${failure.issue}.log`,
-        )
-        .join("\n") +
-      `\n\nInspect them, then delete the branches — Sandcastle ignores baseBranch when a\n` +
-      `branch already exists, so a re-run would otherwise build on a stale ${BASE_BRANCH}:\n` +
-      `  git branch -D ${branches.join(" ")}\n` +
-      `Then run this again to retry ${list(failures.map((failure) => failure.issue))}.`,
-  );
+  // Only what is actually on disk. An agent that died before Sandcastle cut its
+  // branch — while the issue title was being resolved, or the sandbox was coming
+  // up — left neither a branch nor a transcript, and naming one of those in the
+  // deletion command below makes it fail for every branch after it too.
+  const retryable = failures.map((failure) => failure.issue);
+  const leftovers = retryable.filter((issue) => branchExists(agentBranch(issue)));
+
+  if (leftovers.length > 0) {
+    console.log(
+      `\nLeft behind:\n` +
+        leftovers
+          .map((issue) => `  #${issue}: ${agentBranch(issue)}, ${agentLog(issue)}`)
+          .join("\n") +
+        `\n\nInspect them, then delete the branches — Sandcastle ignores baseBranch when a\n` +
+        `branch already exists, so a re-run would otherwise build on a stale ${BASE_BRANCH}:\n` +
+        `  git branch -D ${leftovers.map(agentBranch).join(" ")}\n` +
+        `Should that be refused, the branch is still held by a worktree Sandcastle kept\n` +
+        `because the agent left uncommitted changes. Remove it from ` +
+        `.sandcastle/worktrees/ first.`,
+    );
+  }
+
+  console.log(`\nRun this again to retry ${list(retryable)}.`);
 };
 
 const main = async () => {
@@ -649,7 +689,6 @@ const main = async () => {
       // dependency graph is not worth fetching here.
       const { todo, skipped } = planWave(wave, { closed, failed: new Set(), blockers: null });
       const done = [...skipped.keys()];
-      const list = (issues: readonly number[]) => issues.map((issue) => `#${issue}`).join(", ");
 
       if (todo.length === 0) {
         console.log(`Wave ${index + 1}: ${list(wave)} — already done, skipping`);
@@ -742,20 +781,55 @@ const main = async () => {
 
     // Serialized: each of these checks out branches and moves master.
     const landed: number[] = [];
-    for (const agentRun of agentRuns) {
+    for (const [position, agentRun] of agentRuns.entries()) {
       try {
         outcomes.push({ kind: "landed", issue: agentRun.issue, prUrl: await land(agentRun) });
         landed.push(agentRun.issue);
+        continue;
       } catch (error) {
-        failed.add(agentRun.issue);
         const reason = describeError(error);
-        outcomes.push({ kind: "failed", issue: agentRun.issue, phase: "landing", reason });
-        log(agentRun.issue, `not landed: ${reason}`);
-        if (!restoreBaseBranch()) {
+
+        // `land` merges the pull request before its last step, so a failure in
+        // that tail leaves an issue that is closed: the work did land, and what
+        // is broken is this checkout — a `master` that no longer has the merge.
+        // Calling that a failed issue would stand down a whole chain of
+        // downstream work over something that actually succeeded, so it is
+        // treated as the checkout problem it is and the run stops.
+        if (isClosed(agentRun.issue)) {
+          outcomes.push({
+            kind: "landed",
+            issue: agentRun.issue,
+            prUrl: mergedPrUrl(agentRun.branch),
+          });
+          console.error(
+            `\n#${agentRun.issue} merged, but the step after it failed (${reason}).\n` +
+              `This checkout may no longer match ${BASE_BRANCH} on the remote, and later\n` +
+              `waves branch from it. Reconcile it, then run this again.`,
+          );
           stopped = "checkout";
-          break;
+        } else {
+          failed.add(agentRun.issue);
+          outcomes.push({ kind: "failed", issue: agentRun.issue, phase: "landing", reason });
+          log(agentRun.issue, `not landed: ${reason}`);
+          if (!restoreBaseBranch()) stopped = "checkout";
         }
       }
+
+      if (!stopped) continue;
+
+      // Whatever is left in this wave has commits on its branch and no pull
+      // request, and stopping here must not make it disappear from the summary:
+      // its branch would then be an unexplained leftover blocking the re-run.
+      for (const abandoned of agentRuns.slice(position + 1)) {
+        failed.add(abandoned.issue);
+        outcomes.push({
+          kind: "failed",
+          issue: abandoned.issue,
+          phase: "landing",
+          reason: "not attempted — the run stopped while landing an earlier issue",
+        });
+      }
+      break;
     }
     if (stopped) break;
 
@@ -775,7 +849,7 @@ const main = async () => {
     }
   }
 
-  report(outcomes);
+  summarise(outcomes);
 
   if (failed.size > 0) {
     // A non-zero exit matters now that the process no longer crashes on a
