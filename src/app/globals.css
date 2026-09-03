@@ -223,3 +223,18 @@ button:disabled {
   font-size: 0.8125rem;
   opacity: 0.7;
 }
+
+/*
+ * The report leaves the application from here: copied out with its colours, or
+ * saved as a file. Both are one click, side by side, above the report itself.
+ */
+.rapport__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.rapport__actions button {
+  margin-top: 0;
+}

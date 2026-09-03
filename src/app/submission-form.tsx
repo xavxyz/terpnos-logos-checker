@@ -22,6 +22,7 @@ import {
   uploadTokenRoute,
 } from "@/recording/blob-upload";
 import { buildReport } from "@/report/build-report";
+import { copyReport, downloadReport } from "@/report/handoff";
 import { transcribeRecording } from "@/transcription/polling";
 
 /**
@@ -406,6 +407,10 @@ function ListeEtapes({
  * sophrologist scrolls the page rather than a box within it. The player stays
  * pinned to the top of the report, so a long session is read and listened to at
  * once, and clicking any difference seeks it to that moment of the recording.
+ *
+ * Two buttons take the report out of the application: one copies it whole with
+ * its colours, one saves it as a file. Correction happens in Google Docs or
+ * Notion, never here.
  */
 function Rapport({
   rapport,
@@ -417,6 +422,20 @@ function Rapport({
   const cadre = useRef<HTMLIFrameElement>(null);
   const lecteur = useRef<HTMLAudioElement>(null);
   const [hauteur, setHauteur] = useState<number>();
+  /** What became of the last copy, if one has been asked for. */
+  const [copie, setCopie] = useState<"faite" | "echec" | null>(null);
+
+  // A new session drops the report before it starts, which takes this section
+  // off the page: what was said about the previous copy goes with it.
+
+  async function copier() {
+    try {
+      await copyReport(rapport);
+      setCopie("faite");
+    } catch {
+      setCopie("echec");
+    }
+  }
 
   useEffect(() => {
     const audio = lecteur.current;
@@ -504,6 +523,26 @@ function Rapport({
         vous avez dit sans l’avoir écrit ; en rouge gras barré, ce que vous avez
         écrit sans le dire ; en gris italique, ce qui n’était pas à lire.
       </p>
+      <div className="rapport__actions">
+        <button type="button" onClick={copier}>
+          Copier le rapport
+        </button>
+        <button type="button" onClick={() => downloadReport(rapport)}>
+          Télécharger le rapport
+        </button>
+      </div>
+      {copie === "faite" ? (
+        <p className="discret" role="status">
+          Rapport copié. Collez-le dans Google Docs ou Notion : les couleurs
+          suivent.
+        </p>
+      ) : null}
+      {copie === "echec" ? (
+        <p className="erreur" role="alert">
+          La copie a échoué : votre navigateur n’a pas donné accès au
+          presse-papiers. Vous pouvez télécharger le rapport à la place.
+        </p>
+      ) : null}
       <div className="lecteur">
         <audio
           ref={lecteur}
