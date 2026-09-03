@@ -1,4 +1,5 @@
 import { normalise } from "./normalise";
+import type { TextRange } from "./non-spoken";
 
 const WORD = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu;
 
@@ -23,9 +24,25 @@ export type TranscriptWord = {
   heardIndex: number;
 };
 
-export function tokeniseTerpnosLogos(terpnosLogos: string): WrittenWord[] {
+/**
+ * The spoken content of the terpnos logos, word by word. A compound word yields
+ * one token per part, on this side as on the transcript's, so a hyphen never
+ * counts as a difference. Non-spoken content is left out of the comparison.
+ */
+export function tokeniseTerpnosLogos(
+  terpnosLogos: string,
+  nonSpoken: readonly TextRange[] = [],
+): WrittenWord[] {
   const words: WrittenWord[] = [];
+  // Words and ranges both come in order, so the search never goes back.
+  let range = 0;
+
   for (const match of terpnosLogos.matchAll(WORD)) {
+    while (range < nonSpoken.length && nonSpoken[range].to <= match.index)
+      range++;
+    if (range < nonSpoken.length && match.index >= nonSpoken[range].from)
+      continue;
+
     const normalised = normalise(match[0]);
     if (!normalised) continue;
     words.push({
@@ -34,6 +51,7 @@ export function tokeniseTerpnosLogos(terpnosLogos: string): WrittenWord[] {
       to: match.index + match[0].length,
     });
   }
+
   return words;
 }
 
