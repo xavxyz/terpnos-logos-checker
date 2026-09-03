@@ -11,6 +11,15 @@ import {
 export const recordingsFolder = "enregistrements/";
 
 /**
+ * The store holds recordings of therapy sessions, so it is configured with
+ * private access: a blob answers 403 to anyone who does not carry the owner's
+ * token, and its URL alone is worth nothing. Asking the store for public access
+ * is refused outright, which is why both the browser upload and the link handed
+ * to the transcription provider name this level rather than assume a default.
+ */
+export const recordingAccess = "private";
+
+/**
  * Generous enough for a 40-minute session in uncompressed wav, and low enough
  * that a token cannot be spent on something that is not a recording.
  */

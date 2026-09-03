@@ -1,9 +1,9 @@
-import { head } from "@vercel/blob";
+import { issueSignedToken, presignUrl } from "@vercel/blob";
 import { NextResponse } from "next/server";
 
 import { hasRememberedSession } from "@/auth/session";
 import { deleteRecording } from "@/recording/blob-store";
-import { isRecordingPathname } from "@/recording/blob-upload";
+import { isRecordingPathname, recordingAccess } from "@/recording/blob-upload";
 import {
   isJobReference,
   type StartedTranscriptionResponse,
@@ -39,7 +39,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   let recordingUrl: string;
 
   try {
-    ({ url: recordingUrl } = await head(chemin));
+    recordingUrl = await readableRecordingUrl(chemin);
   } catch {
     return refusal(recordingLost, 502);
   }
@@ -99,6 +99,35 @@ export async function GET(request: Request): Promise<NextResponse> {
             "L’enregistrement n’a pas pu être supprimé du stockage. Prévenez le propriétaire.",
         }),
   } satisfies TranscriptionProgressResponse);
+}
+
+/**
+ * The store is private, so a recording's own URL answers 403 to anyone but the
+ * owner's token — and the transcription provider fetches the audio itself, from
+ * its own servers. So it is handed a link signed for this one recording, for
+ * reading only, that expires on its own.
+ *
+ * The window is generous because the provider queues the job and may not fetch
+ * the audio the moment it is handed the link, and it costs nothing to be
+ * patient: the recording is deleted as soon as the transcript is in, which is
+ * what really ends the link's life.
+ */
+const recordingLinkValidityInMilliseconds = 6 * 60 * 60 * 1000;
+
+async function readableRecordingUrl(chemin: string): Promise<string> {
+  const signed = await issueSignedToken({
+    pathname: chemin,
+    operations: ["get"],
+    validUntil: Date.now() + recordingLinkValidityInMilliseconds,
+  });
+
+  const { presignedUrl } = await presignUrl(signed, {
+    operation: "get",
+    pathname: chemin,
+    access: recordingAccess,
+  });
+
+  return presignedUrl;
 }
 
 /**
