@@ -7,24 +7,29 @@
  * editor — a clipboard and a file survive a migration between them.
  */
 
+import { reportPalette } from "./palette";
+
 /**
  * The report's own styles, spelled out on the elements that carry them. A
  * stylesheet does not travel with a paste: Google Docs and Notion read the
  * pasted markup and drop anything a `<style>` block would have said, so the
- * red, the strike-through and the grey italic ride on the elements instead.
+ * coral, the strike-through and the muted italic ride on the elements instead.
  */
 const INLINE_STYLES: Record<string, string> = {
-  addition: "color:#c0392b;font-weight:700;",
-  omission: "color:#c0392b;font-weight:700;text-decoration:line-through;",
+  addition: `color:${reportPalette.difference};font-weight:700;`,
+  omission:
+    `color:${reportPalette.difference};font-weight:700;` +
+    "text-decoration:line-through;",
   "non-spoken":
-    "color:#8b8378;font-style:italic;font-weight:400;text-decoration:none;",
+    `color:${reportPalette.nonDit};` +
+    "font-style:italic;font-weight:400;text-decoration:none;",
 };
 
 /** What holds the pasted report together: the pacing of the terpnos logos. */
 // Single quotes around the font name on purpose: this whole declaration sits
 // inside a double-quoted attribute, and a double quote here would close it.
 const DOCUMENT_STYLE =
-  "white-space:pre-wrap;color:#1f1b16;" +
+  `white-space:pre-wrap;color:${reportPalette.encre};` +
   "font-family:Georgia,'Times New Roman',serif;";
 
 /** The report as the clipboard carries it: formatted, and plain. */
