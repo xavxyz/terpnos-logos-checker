@@ -19,6 +19,7 @@ import {
 import {
   recordingDeletionRoute,
   recordingPathname,
+  recordingAccess,
   uploadTokenRoute,
 } from "@/recording/blob-upload";
 import { buildReport } from "@/report/build-report";
@@ -173,7 +174,7 @@ export function SubmissionForm() {
       // Straight from the browser to Vercel Blob, in one piece, whatever the
       // length of the session: the file never enters a function body.
       await upload(destination, recording, {
-        access: "public",
+        access: recordingAccess,
         contentType: recordingContentType(format),
         handleUploadUrl: uploadTokenRoute,
         // The recording is neither split nor transcoded: it is sent whole, and
