@@ -1,5 +1,24 @@
+/*
+ * The palette of the sophrologist's own site
+ * (heloise-lopez-sophrologue.com), so the tool sits beside her practice rather
+ * than beside a default browser page: deep purple ink, a cool white page, warm
+ * cream surfaces, sand and coral. The palette is a light one and has no dark
+ * counterpart, so the page declares itself light rather than following the
+ * system and rendering purple on black.
+ */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+
+  --encre: #492e76;
+  --fond: #f5fdff;
+  --fond-doux: #f6efe9;
+  --sable: #f0c274;
+  --corail: #e58a71;
+
+  /* Coral, darkened until it carries text on a pale surface. */
+  --corail-lisible: #b94322;
+
+  --trait: color-mix(in srgb, var(--encre) 22%, var(--fond));
 }
 
 * {
@@ -22,8 +41,8 @@ body {
 }
 
 body {
-  background: Canvas;
-  color: CanvasText;
+  background: var(--fond);
+  color: var(--encre);
 }
 
 .ecran {
@@ -55,12 +74,12 @@ h1 {
 
 textarea,
 input[type="password"] {
-  border: 1px solid color-mix(in srgb, CanvasText 25%, Canvas);
+  border: 1px solid var(--trait);
   border-radius: 0.375rem;
   padding: 0.625rem 0.75rem;
   font: inherit;
   color: inherit;
-  background: Canvas;
+  background: var(--fond);
   width: 100%;
 }
 
@@ -70,7 +89,7 @@ textarea {
 }
 
 .depot {
-  border: 1px dashed color-mix(in srgb, CanvasText 35%, Canvas);
+  border: 1px dashed color-mix(in srgb, var(--encre) 35%, var(--fond));
   border-radius: 0.5rem;
   padding: 1.75rem 1rem;
   text-align: center;
@@ -79,7 +98,8 @@ textarea {
 
 .depot--survole {
   border-style: solid;
-  background: color-mix(in srgb, CanvasText 6%, Canvas);
+  border-color: var(--corail);
+  background: var(--fond-doux);
 }
 
 .depot p {
@@ -97,7 +117,7 @@ textarea {
 
 .erreur {
   margin: 0;
-  color: #b3261e;
+  color: var(--corail-lisible);
   font-size: 0.875rem;
 }
 
@@ -109,8 +129,8 @@ button {
   padding: 0.625rem 1.25rem;
   font: inherit;
   font-weight: 600;
-  color: Canvas;
-  background: CanvasText;
+  color: var(--fond);
+  background: var(--encre);
   cursor: pointer;
 }
 
@@ -128,6 +148,7 @@ button {
 progress {
   width: 100%;
   height: 0.5rem;
+  accent-color: var(--sable);
 }
 
 button:disabled {
@@ -167,6 +188,7 @@ button:disabled {
 .etape--faite .etape__nom {
   text-decoration: underline;
   text-decoration-style: dotted;
+  text-decoration-color: var(--corail);
 }
 
 .rapport {
@@ -191,9 +213,11 @@ button:disabled {
   display: block;
   width: 100%;
   min-height: 12rem;
-  border: 1px solid color-mix(in srgb, CanvasText 25%, Canvas);
+  border: 1px solid var(--trait);
   border-radius: 0.5rem;
-  background: #fdfcfa;
+  /* The frame carries the report's own background, so the seam does not show:
+     the value is `reportPalette.fond` in src/report/palette.ts. */
+  background: var(--fond-doux);
 }
 
 /*
@@ -210,7 +234,7 @@ button:disabled {
   gap: 0.375rem;
   margin-bottom: 0.75rem;
   padding: 0.5rem 0 0.75rem;
-  background: Canvas;
+  background: var(--fond);
 }
 
 .lecteur__audio {

@@ -1,4 +1,5 @@
 import { diff, type DiffOp } from "./diff";
+import { reportPalette } from "./palette";
 import { nonSpokenRanges, segments, type TextRange } from "./non-spoken";
 import {
   tokeniseTerpnosLogos,
@@ -20,8 +21,8 @@ const STYLES = `
   body {
     margin: 0;
     padding: 2rem 1.5rem;
-    background: #fdfcfa;
-    color: #1f1b16;
+    background: ${reportPalette.fond};
+    color: ${reportPalette.encre};
     font: 1.05rem/1.7 Georgia, "Times New Roman", serif;
   }
   .terpnos-logos {
@@ -31,7 +32,7 @@ const STYLES = `
   }
   .addition,
   .omission {
-    color: #c0392b;
+    color: ${reportPalette.difference};
     font-weight: 700;
     /* Every difference carries its moment: clicking one seeks the player. */
     cursor: pointer;
@@ -40,7 +41,7 @@ const STYLES = `
     text-decoration: line-through;
   }
   .non-spoken {
-    color: #8b8378;
+    color: ${reportPalette.nonDit};
     font-style: italic;
     font-weight: 400;
     text-decoration: none;
