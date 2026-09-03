@@ -20,16 +20,38 @@ import {
   recordingPathname,
   uploadTokenRoute,
 } from "@/recording/blob-upload";
+import { transcribeRecording } from "@/transcription/polling";
 
-type Etape = "attente" | "envoi" | "liberation" | "termine";
+/**
+ * The named steps of the wait, in order. Two minutes pass between dropping the
+ * recording and reading the report, and the sophrologist must never wonder
+ * whether the application has frozen: she is told which step she is on.
+ */
+const etapes = [
+  { cle: "envoi", nom: "Envoi" },
+  { cle: "transcription", nom: "Transcription" },
+  { cle: "comparaison", nom: "Comparaison" },
+] as const;
+
+type Etape = (typeof etapes)[number]["cle"];
+
+type Avancement = "attente" | Etape;
+
+const etatDeLEtape = {
+  faite: "terminée",
+  "en-cours": "en cours",
+  "a-venir": "à venir",
+} as const;
 
 export function SubmissionForm() {
   const fileInput = useRef<HTMLInputElement>(null);
   const [recording, setRecording] = useState<File | null>(null);
   const [refus, setRefus] = useState<string | null>(null);
+  const [avertissement, setAvertissement] = useState<string | null>(null);
   const [survole, setSurvole] = useState(false);
-  const [etape, setEtape] = useState<Etape>("attente");
+  const [avancement, setAvancement] = useState<Avancement>("attente");
   const [progression, setProgression] = useState(0);
+  const [motsReconnus, setMotsReconnus] = useState(0);
 
   // The recording currently in the store, if any. Held in a ref so the page can
   // still name it when it is unloaded in the middle of an upload.
@@ -70,7 +92,8 @@ export function SubmissionForm() {
     }
 
     setRefus(null);
-    setEtape("attente");
+    setAvertissement(null);
+    setAvancement("attente");
     setProgression(0);
     setRecording(file);
   }
@@ -98,7 +121,7 @@ export function SubmissionForm() {
   async function envoyer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (etape === "envoi" || etape === "liberation") return;
+    if (avancement === "envoi" || avancement === "transcription") return;
 
     if (!recording) {
       setRefus("Déposez d’abord l’enregistrement de la séance.");
@@ -118,8 +141,9 @@ export function SubmissionForm() {
 
     chemin.current = destination;
     setRefus(null);
+    setAvertissement(null);
     setProgression(0);
-    setEtape("envoi");
+    setAvancement("envoi");
 
     try {
       // Straight from the browser to Vercel Blob, in one piece, whatever the
@@ -140,29 +164,40 @@ export function SubmissionForm() {
       // A failed upload can still have left parts behind, and a paid blob must
       // not survive a failure.
       await supprimer(destination).catch(() => false);
-      setEtape("attente");
+      setAvancement("attente");
       setRefus(
         "L’envoi de l’enregistrement a échoué. Vérifiez votre connexion et réessayez.",
       );
       return;
     }
 
-    // The end of the flow, for now: nothing else uses the recording yet, so the
-    // server deletes it immediately rather than let it accrue storage cost.
-    setEtape("liberation");
+    setAvancement("transcription");
 
-    if (!(await supprimer(destination).catch(() => false))) {
-      setEtape("attente");
-      setRefus(
-        "L’enregistrement a été envoyé mais n’a pas pu être supprimé du stockage. Prévenez le propriétaire.",
-      );
+    // The server starts the job and answers with its reference; the browser
+    // asks that same route how it is going until the transcript is in. The
+    // provider is never called from here, so the owner's key stays server-side.
+    const transcription = await transcribeRecording(destination);
+
+    if (transcription.kind === "failed") {
+      // The server deletes the recording as soon as a transcription has
+      // definitively failed; this covers the failures it never saw.
+      await supprimer(destination).catch(() => false);
+      setAvancement("attente");
+      setRefus(transcription.failure.message);
       return;
     }
 
-    setEtape("termine");
+    // The recording is gone: the server deleted it in the very request that
+    // brought the transcript back. If it could not, the page keeps holding it
+    // so that leaving asks for it again.
+    if (!transcription.avertissement) chemin.current = null;
+
+    setMotsReconnus(transcription.transcript.words.length);
+    setAvertissement(transcription.avertissement ?? null);
+    setAvancement("comparaison");
   }
 
-  const enCours = etape === "envoi" || etape === "liberation";
+  const enCours = avancement === "envoi" || avancement === "transcription";
 
   return (
     <main className="ecran">
@@ -228,28 +263,74 @@ export function SubmissionForm() {
           Comparer
         </button>
 
-        {etape === "envoi" ? (
+        {avancement === "attente" ? null : (
           <div className="progres">
-            <p role="status">Envoi de l’enregistrement… {progression} %</p>
-            <progress max={100} value={progression} />
+            <ListeEtapes courante={avancement} />
+
+            {avancement === "envoi" ? (
+              <>
+                <p role="status">Envoi de l’enregistrement… {progression} %</p>
+                <progress max={100} value={progression} />
+              </>
+            ) : null}
+
+            {avancement === "transcription" ? (
+              <p role="status">
+                Transcription de l’enregistrement… Comptez une à trois minutes
+                pour une séance.
+              </p>
+            ) : null}
+
+            {avancement === "comparaison" ? (
+              <>
+                <p role="status">
+                  Transcription terminée :{" "}
+                  {motsReconnus.toLocaleString("fr-FR")} mots reconnus.
+                  L’enregistrement a été supprimé du stockage.
+                </p>
+                <p className="discret">
+                  La comparaison n’est pas encore branchée.
+                </p>
+              </>
+            ) : null}
+
+            {avertissement ? (
+              <p className="erreur" role="alert">
+                {avertissement}
+              </p>
+            ) : null}
           </div>
-        ) : null}
-
-        {etape === "liberation" ? (
-          <p className="discret" role="status">
-            Envoi terminé. Suppression de l’enregistrement du stockage…
-          </p>
-        ) : null}
-
-        {etape === "termine" ? (
-          <>
-            <p role="status">
-              Envoi terminé. L’enregistrement a été supprimé du stockage.
-            </p>
-            <p className="discret">La comparaison n’est pas encore branchée.</p>
-          </>
-        ) : null}
+        )}
       </form>
     </main>
+  );
+}
+
+/** The three named steps, and where the session stands among them. */
+function ListeEtapes({ courante }: { courante: Etape }) {
+  const rangCourant = etapes.findIndex((etape) => etape.cle === courante);
+
+  return (
+    <ol className="etapes" role="status">
+      {etapes.map((etape, rang) => {
+        const etat =
+          rang < rangCourant
+            ? "faite"
+            : rang === rangCourant
+              ? "en-cours"
+              : "a-venir";
+
+        return (
+          <li
+            key={etape.cle}
+            className={`etape etape--${etat}`}
+            aria-current={etat === "en-cours" ? "step" : undefined}
+          >
+            <span className="etape__nom">{etape.nom}</span>
+            <span className="etape__etat">{etatDeLEtape[etat]}</span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
