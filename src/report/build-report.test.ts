@@ -25,6 +25,14 @@ const startsOf = (html: string, kind: "addition" | "omission") =>
     ),
   ].map((match) => Number(match[1]));
 
+const nonSpoken = (html: string) =>
+  [...html.matchAll(/<span class="non-spoken">(.*?)<\/span>/gs)].map(
+    (match) => match[1],
+  );
+
+const styleRuleFor = (html: string, selector: string) =>
+  new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`).exec(html)?.[1] ?? "";
+
 const plainText = (html: string) =>
   html
     .slice(html.indexOf("<body>"))
@@ -129,6 +137,87 @@ describe("buildReport", () => {
     expect(plainText(html)).toContain(script);
   });
 
+  it("reports no difference between a spelled-out number and a digit", () => {
+    const html = buildReport({
+      script: "Comptez trois respirations, puis cinq.",
+      transcript: { words: spoken("Comptez 3 respirations, puis 5.") },
+    });
+
+    expect(marked(html, "addition")).toEqual([]);
+    expect(marked(html, "omission")).toEqual([]);
+    expect(plainText(html)).toContain("Comptez trois respirations, puis cinq.");
+  });
+
+  it("reports no difference between a digit and a spelled-out number", () => {
+    const html = buildReport({
+      script: "Comptez jusqu'à 10.",
+      transcript: { words: spoken("Comptez jusqu'à dix.") },
+    });
+
+    expect(marked(html, "addition")).toEqual([]);
+    expect(marked(html, "omission")).toEqual([]);
+  });
+
+  it("reports no difference over accents, capitals, punctuation or apostrophes", () => {
+    const html = buildReport({
+      script: "Détendez l'épaule droite, doucement.",
+      transcript: { words: spoken("detendez lepaule DROITE doucement") },
+    });
+
+    expect(marked(html, "addition")).toEqual([]);
+    expect(marked(html, "omission")).toEqual([]);
+    expect(plainText(html)).toContain("Détendez l'épaule droite, doucement.");
+  });
+
+  it("reports no difference over a hyphen in a compound word", () => {
+    const html = buildReport({
+      script: "Observez les micro-mouvements, peut-être.",
+      transcript: {
+        words: spoken("Observez les micro mouvements, peut être."),
+      },
+    });
+
+    expect(marked(html, "addition")).toEqual([]);
+    expect(marked(html, "omission")).toEqual([]);
+    expect(plainText(html)).toContain(
+      "Observez les micro-mouvements, peut-être.",
+    );
+  });
+
+  it("reports no difference when the transcription joins a compound word", () => {
+    const html = buildReport({
+      script: "Observez les micro mouvements. Concentrez vous.",
+      transcript: {
+        words: spoken("Observez les micro-mouvements. Concentrez-vous."),
+      },
+    });
+
+    expect(marked(html, "addition")).toEqual([]);
+    expect(marked(html, "omission")).toEqual([]);
+  });
+
+  it("reports no difference over the oe ligature", () => {
+    const html = buildReport({
+      script: "Posez la main sur le coeur, le cœur bat.",
+      transcript: { words: spoken("Posez la main sur le cœur, le coeur bat.") },
+    });
+
+    expect(marked(html, "addition")).toEqual([]);
+    expect(marked(html, "omission")).toEqual([]);
+    expect(plainText(html)).toContain("le coeur, le cœur bat.");
+  });
+
+  it("keeps the punctuation that follows an omitted passage", () => {
+    const script = "Fermez les yeux, lentement, puis respirez.";
+    const html = buildReport({
+      script,
+      transcript: { words: spoken("Fermez les yeux, puis respirez.") },
+    });
+
+    expect(marked(html, "omission")).toEqual(["lentement"]);
+    expect(plainText(html)).toContain(script);
+  });
+
   it("surfaces hesitations as additions", () => {
     const html = buildReport({
       script: "Fermez les yeux.",
@@ -213,6 +302,69 @@ describe("buildReport", () => {
     expect(marked(html, "omission")).toEqual([
       "Fermez les yeux.\n\nRespirez lentement",
     ]);
+    expect(plainText(html)).toContain(script);
+  });
+
+  it("never reports bracketed content as an omission", () => {
+    const script =
+      "[Séance du 3 mars — SDN]\n\nFermez les yeux.\n\n[Désophronisation]\n\nÉtirez-vous.";
+    const html = buildReport({
+      script,
+      transcript: { words: spoken("Fermez les yeux. Étirez-vous.") },
+    });
+
+    expect(marked(html, "omission")).toEqual([]);
+    expect(marked(html, "addition")).toEqual([]);
+    expect(plainText(html)).toContain(script);
+  });
+
+  it("renders bracketed content as non-spoken", () => {
+    const html = buildReport({
+      script: "[Désophronisation]\n\nÉtirez-vous.",
+      transcript: { words: spoken("Étirez-vous.") },
+    });
+
+    expect(nonSpoken(html)).toEqual(["[Désophronisation]"]);
+    expect(styleRuleFor(html, ".non-spoken")).toMatch(/font-style:\s*italic/);
+    expect(styleRuleFor(html, ".non-spoken")).toMatch(/color:\s*#[0-9a-f]{6}/i);
+  });
+
+  it("keeps bracketed content out of a surrounding omission", () => {
+    const script = "Respirez lentement.\n\n[SDN]\n\nDétendez vos épaules.";
+    const html = buildReport({
+      script,
+      transcript: { words: spoken("Voilà.") },
+    });
+
+    expect(nonSpoken(html)).toEqual(["[SDN]"]);
+    expect(marked(html, "omission")).toEqual([
+      "Respirez lentement.",
+      "Détendez vos épaules",
+    ]);
+    expect(plainText(html)).toContain(script);
+  });
+
+  it("does not let an unclosed bracket swallow the rest of the document", () => {
+    const script = "Fermez les yeux [note à moi-même\n\nRespirez lentement.";
+    const html = buildReport({
+      script,
+      transcript: { words: spoken("Fermez les yeux note à moi-même") },
+    });
+
+    expect(nonSpoken(html)).toEqual([]);
+    expect(marked(html, "omission")).toEqual(["Respirez lentement"]);
+    expect(plainText(html)).toContain(script);
+  });
+
+  it("does not let an unclosed bracket swallow a later heading", () => {
+    const script = "Fermez [les yeux.\n\n[SDN]\n\nRespirez lentement.";
+    const html = buildReport({
+      script,
+      transcript: { words: spoken("Fermez les yeux. Respirez lentement.") },
+    });
+
+    expect(nonSpoken(html)).toEqual(["[SDN]"]);
+    expect(marked(html, "omission")).toEqual([]);
     expect(plainText(html)).toContain(script);
   });
 

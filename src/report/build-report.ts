@@ -1,4 +1,5 @@
 import { diff, type DiffOp } from "./diff";
+import { nonSpokenRanges, segments, type TextRange } from "./non-spoken";
 import {
   tokeniseTerpnosLogos,
   tokeniseTranscript,
@@ -36,6 +37,12 @@ const STYLES = `
   .omission {
     text-decoration: line-through;
   }
+  .non-spoken {
+    color: #8b8378;
+    font-style: italic;
+    font-weight: 400;
+    text-decoration: none;
+  }
 `;
 
 /** The moment a difference points at when nothing has been spoken yet. */
@@ -48,32 +55,76 @@ const START_OF_RECORDING = 0;
  */
 export function buildReport({ script, transcript }: ReportInput): string {
   const terpnosLogos = script;
-  const written = tokeniseTerpnosLogos(terpnosLogos);
+  const nonSpoken = nonSpokenRanges(terpnosLogos);
+  const written = tokeniseTerpnosLogos(terpnosLogos, nonSpoken);
   const heard = tokeniseTranscript(transcript.words);
   const ops = diff(
     written.map((word) => word.normalised),
     heard.map((word) => word.normalised),
   );
 
-  return htmlDocument(render({ terpnosLogos, written, heard, ops }));
+  return htmlDocument(render({ terpnosLogos, nonSpoken, written, heard, ops }));
 }
 
 type RenderInput = {
   terpnosLogos: string;
+  nonSpoken: TextRange[];
   written: WrittenWord[];
   heard: TranscriptWord[];
   ops: DiffOp[];
 };
 
-function render({ terpnosLogos, written, heard, ops }: RenderInput): string {
+function render({
+  terpnosLogos,
+  nonSpoken,
+  written,
+  heard,
+  ops,
+}: RenderInput): string {
   const out: string[] = [];
   let cursor = 0;
   /** Where the recording stands, so a difference can seek the player. */
   let lastSpokenStart = START_OF_RECORDING;
   let anythingRendered = false;
 
-  const emitGapBefore = (word: WrittenWord) => {
-    out.push(escapeHtml(terpnosLogos.slice(cursor, word.from)));
+  /** The terpnos logos as written, non-spoken content marked as such. */
+  const emit = (from: number, to: number) => {
+    for (const segment of segments(nonSpoken, from, to)) {
+      const asWritten = escapeHtml(
+        terpnosLogos.slice(segment.from, segment.to),
+      );
+      out.push(segment.nonSpoken ? nonSpokenSpan(asWritten) : asWritten);
+    }
+  };
+
+  /**
+   * One skipped passage, one continuous block, punctuation included. Non-spoken
+   * content caught inside it is never struck through: it was never to be read.
+   */
+  const emitOmission = (from: number, to: number) => {
+    for (const segment of segments(nonSpoken, from, to)) {
+      const skipped = terpnosLogos.slice(segment.from, segment.to);
+      if (segment.nonSpoken) {
+        out.push(nonSpokenSpan(escapeHtml(skipped)));
+        continue;
+      }
+      // Whitespace hugging non-spoken content is not part of the passage.
+      const lead = skipped.length - skipped.trimStart().length;
+      const tail = skipped.length - skipped.trimEnd().length;
+      if (lead === skipped.length) {
+        out.push(escapeHtml(skipped));
+        continue;
+      }
+      out.push(escapeHtml(skipped.slice(0, lead)));
+      out.push(
+        span(
+          "omission",
+          lastSpokenStart,
+          escapeHtml(skipped.slice(lead, skipped.length - tail)),
+        ),
+      );
+      out.push(escapeHtml(skipped.slice(skipped.length - tail)));
+    }
   };
 
   for (const run of runs(ops)) {
@@ -81,8 +132,7 @@ function render({ terpnosLogos, written, heard, ops }: RenderInput): string {
       case "equal": {
         for (const op of run.ops) {
           const word = written[op.left];
-          emitGapBefore(word);
-          out.push(escapeHtml(terpnosLogos.slice(word.from, word.to)));
+          emit(cursor, word.to);
           cursor = word.to;
           lastSpokenStart = heard[op.right].start;
           anythingRendered = true;
@@ -91,17 +141,10 @@ function render({ terpnosLogos, written, heard, ops }: RenderInput): string {
       }
 
       case "omission": {
-        // One skipped passage, one continuous block, punctuation included.
         const first = written[run.ops[0].left];
         const last = written[run.ops[run.ops.length - 1].left];
-        emitGapBefore(first);
-        out.push(
-          span(
-            "omission",
-            lastSpokenStart,
-            escapeHtml(terpnosLogos.slice(first.from, last.to)),
-          ),
-        );
+        emit(cursor, first.from);
+        emitOmission(first.from, last.to);
         cursor = last.to;
         anythingRendered = true;
         break;
@@ -112,7 +155,8 @@ function render({ terpnosLogos, written, heard, ops }: RenderInput): string {
         // Punctuation closing the previous written word stays attached to it;
         // the addition goes after it, and before any line break that follows.
         const attached = anythingRendered
-          ? (/^[^\s\p{L}\p{N}]*/u.exec(terpnosLogos.slice(cursor))?.[0] ?? "")
+          ? (/^[^\s\p{L}\p{N}\[\]]*/u.exec(terpnosLogos.slice(cursor))?.[0] ??
+            "")
           : "";
         out.push(escapeHtml(attached));
         cursor += attached.length;
@@ -130,7 +174,7 @@ function render({ terpnosLogos, written, heard, ops }: RenderInput): string {
     }
   }
 
-  out.push(escapeHtml(terpnosLogos.slice(cursor)));
+  emit(cursor, terpnosLogos.length);
   return out.join("");
 }
 
@@ -168,6 +212,10 @@ function span(
   content: string,
 ): string {
   return `<span class="${kind}" data-start="${Math.round(start)}">${content}</span>`;
+}
+
+function nonSpokenSpan(content: string): string {
+  return `<span class="non-spoken">${content}</span>`;
 }
 
 function escapeHtml(text: string): string {
