@@ -2,6 +2,7 @@
 
 import { upload } from "@vercel/blob/client";
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -20,6 +21,7 @@ import {
   recordingPathname,
   uploadTokenRoute,
 } from "@/recording/blob-upload";
+import { buildReport } from "@/report/build-report";
 import { transcribeRecording } from "@/transcription/polling";
 
 /**
@@ -35,7 +37,8 @@ const etapes = [
 
 type Etape = (typeof etapes)[number]["cle"];
 
-type Avancement = "attente" | Etape;
+/** Where the session stands: before the first step, on one, or past the last. */
+type Avancement = "attente" | Etape | "rapport";
 
 const etatDeLEtape = {
   faite: "terminée",
@@ -52,6 +55,8 @@ export function SubmissionForm() {
   const [avancement, setAvancement] = useState<Avancement>("attente");
   const [progression, setProgression] = useState(0);
   const [motsReconnus, setMotsReconnus] = useState(0);
+  /** The report, exactly as the comparison seam returned it. */
+  const [rapport, setRapport] = useState<string | null>(null);
 
   // The recording currently in the store, if any. Held in a ref so the page can
   // still name it when it is unloaded in the middle of an upload.
@@ -121,7 +126,20 @@ export function SubmissionForm() {
   async function envoyer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (avancement === "envoi" || avancement === "transcription") return;
+    // One session at a time: a second submission while this one is still
+    // working would upload over it and land its report on the wrong flow.
+    if (avancement !== "attente" && avancement !== "rapport") return;
+
+    // The terpnos logos is read here and stays here: it is never sent to a
+    // server, because the comparison runs in the browser.
+    const terpnosLogos = String(
+      new FormData(event.currentTarget).get("terpnos-logos") ?? "",
+    );
+
+    if (!terpnosLogos.trim()) {
+      setRefus("Collez d’abord le terpnos logos de la séance.");
+      return;
+    }
 
     if (!recording) {
       setRefus("Déposez d’abord l’enregistrement de la séance.");
@@ -142,6 +160,7 @@ export function SubmissionForm() {
     chemin.current = destination;
     setRefus(null);
     setAvertissement(null);
+    setRapport(null);
     setProgression(0);
     setAvancement("envoi");
 
@@ -195,9 +214,34 @@ export function SubmissionForm() {
     setMotsReconnus(transcription.transcript.words.length);
     setAvertissement(transcription.avertissement ?? null);
     setAvancement("comparaison");
+
+    // The comparison is fast, but it is a named step: the browser is given the
+    // chance to paint it before the work starts, so it is seen rather than
+    // skipped over.
+    await new Promise((peint) => setTimeout(peint, 0));
+
+    let compare: string;
+
+    try {
+      // The one seam of the application, run here on the real transcript. What
+      // it returns is the report: the page shows it and reshapes nothing.
+      compare = buildReport({
+        script: terpnosLogos,
+        transcript: transcription.transcript,
+      });
+    } catch {
+      setAvancement("attente");
+      setRefus(
+        "La comparaison du terpnos logos et de l’enregistrement a échoué. Réessayez la séance.",
+      );
+      return;
+    }
+
+    setRapport(compare);
+    setAvancement("rapport");
   }
 
-  const enCours = avancement === "envoi" || avancement === "transcription";
+  const enCours = avancement !== "attente" && avancement !== "rapport";
 
   return (
     <main className="ecran">
@@ -282,16 +326,16 @@ export function SubmissionForm() {
             ) : null}
 
             {avancement === "comparaison" ? (
-              <>
-                <p role="status">
-                  Transcription terminée :{" "}
-                  {motsReconnus.toLocaleString("fr-FR")} mots reconnus.
-                  L’enregistrement a été supprimé du stockage.
-                </p>
-                <p className="discret">
-                  La comparaison n’est pas encore branchée.
-                </p>
-              </>
+              <p role="status">
+                Comparaison du terpnos logos et de l’enregistrement…
+              </p>
+            ) : null}
+
+            {avancement === "rapport" ? (
+              <p role="status">
+                Transcription terminée : {motsReconnus.toLocaleString("fr-FR")}{" "}
+                mots reconnus. L’enregistrement a été supprimé du stockage.
+              </p>
             ) : null}
 
             {avertissement ? (
@@ -302,13 +346,23 @@ export function SubmissionForm() {
           </div>
         )}
       </form>
+
+      {rapport ? <Rapport rapport={rapport} /> : null}
     </main>
   );
 }
 
 /** The three named steps, and where the session stands among them. */
-function ListeEtapes({ courante }: { courante: Etape }) {
-  const rangCourant = etapes.findIndex((etape) => etape.cle === courante);
+function ListeEtapes({
+  courante,
+}: {
+  courante: Exclude<Avancement, "attente">;
+}) {
+  // Past the last step every step is behind her, and the report is on screen.
+  const rangCourant =
+    courante === "rapport"
+      ? etapes.length
+      : etapes.findIndex((etape) => etape.cle === courante);
 
   return (
     <ol className="etapes" role="status">
@@ -332,5 +386,58 @@ function ListeEtapes({ courante }: { courante: Etape }) {
         );
       })}
     </ol>
+  );
+}
+
+/**
+ * The report, in the page. It is a self-contained document with its own styles,
+ * so it is shown as the document it is and nothing about it is recomputed or
+ * reshaped here: the frame receives the very string the comparison returned.
+ *
+ * Scripts are refused inside it, and it is sized to its own content so the
+ * sophrologist scrolls the page rather than a box within it.
+ */
+function Rapport({ rapport }: { rapport: string }) {
+  const cadre = useRef<HTMLIFrameElement>(null);
+  const [hauteur, setHauteur] = useState<number>();
+
+  const mesurer = useCallback(() => {
+    // The body of the report is as tall as the terpnos logos it holds, and no
+    // taller: measuring it cannot chase the height it is being given.
+    const corps = cadre.current?.contentDocument?.body;
+
+    if (corps) setHauteur(corps.scrollHeight);
+  }, []);
+
+  useEffect(() => {
+    const iframe = cadre.current;
+
+    if (!iframe) return;
+
+    // A narrower page reflows the report and changes its height.
+    const observateur = new ResizeObserver(mesurer);
+    observateur.observe(iframe);
+
+    return () => observateur.disconnect();
+  }, [mesurer]);
+
+  return (
+    <section className="rapport" aria-labelledby="titre-rapport">
+      <h2 id="titre-rapport">Rapport de la séance</h2>
+      <p className="discret">
+        Votre terpnos logos tel que vous l’avez écrit. En rouge gras, ce que
+        vous avez dit sans l’avoir écrit ; en rouge gras barré, ce que vous avez
+        écrit sans le dire ; en gris italique, ce qui n’était pas à lire.
+      </p>
+      <iframe
+        ref={cadre}
+        className="rapport__cadre"
+        title="Rapport de la séance"
+        sandbox="allow-same-origin"
+        srcDoc={rapport}
+        style={hauteur ? { height: `${hauteur}px` } : undefined}
+        onLoad={mesurer}
+      />
+    </section>
   );
 }

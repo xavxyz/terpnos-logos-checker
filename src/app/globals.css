@@ -168,3 +168,30 @@ button:disabled {
   text-decoration: underline;
   text-decoration-style: dotted;
 }
+
+.rapport {
+  margin-top: 3rem;
+}
+
+.rapport h2 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+
+.rapport .discret {
+  margin: 0 0 1rem;
+}
+
+/*
+ * The report is a document of its own, with its own styles: it is shown whole,
+ * at its natural height, so the page scrolls and not a box inside it.
+ */
+.rapport__cadre {
+  display: block;
+  width: 100%;
+  min-height: 12rem;
+  border: 1px solid color-mix(in srgb, CanvasText 25%, Canvas);
+  border-radius: 0.5rem;
+  background: #fdfcfa;
+}
